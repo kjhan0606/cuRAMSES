@@ -19,7 +19,9 @@
 #define NVECTOR 32
 #endif
 
+#ifndef N_STREAMS
 #define N_STREAMS 1
+#endif
 
 // Stencil ranges (matches hydro_parameters.f90: iu1:iu2 = -1:4)
 #define IU1 (-1)
@@ -119,6 +121,8 @@ extern "C" {
     void cuda_mesh_upload(const double* uold, const double* f_grav,
                           const int* son, long long ncell, int nvar, int ndim);
     void cuda_mesh_free(void);
+    int  cuda_mesh_is_ready(void);  // returns 1 if mesh allocated successfully
+    cudaEvent_t cuda_get_upload_event(void);  // event signaling async upload done
 
     // Scatter-reduce: 5 kernels + scatter_reduce kernel, D2H compact output
     void hydro_cuda_unsplit_reduce_async(
@@ -129,6 +133,33 @@ extern "C" {
         double dx, double dy, double dz, double dt,
         int ngrid, int stride, int stream_slot);
     void hydro_cuda_unsplit_reduce_sync(int ngrid, int stream_slot);
+
+    // GPU-gather + scatter-reduce: stencil idx -> GPU gather -> compute -> scatter_reduce -> compact D2H
+    void hydro_cuda_gather_reduce_async(
+        const int* h_stencil_idx, const int* h_stencil_grav,
+        const double* h_interp_vals,
+        double* h_add_unew, double* h_add_lm1,
+        double* h_add_divu_l, double* h_add_enew_l,
+        double* h_add_divu_lm1, double* h_add_enew_lm1,
+        double dx, double dy, double dz, double dt,
+        int ngrid, int stride, int n_interp, int stream_slot);
+    void hydro_cuda_gather_reduce_sync(int ngrid, int stream_slot);
+
+    // GPU-accelerated Poisson MG
+    void cuda_mg_upload(const double* phi, const double* f,
+                        const int* flag2, long long ncell,
+                        const int* nbor_grid, const int* igrid, int ngrid);
+    void cuda_mg_download_phi(double* phi, long long ncell);
+    void cuda_mg_upload_phi(const double* phi, long long ncell);
+    void cuda_mg_download_f1(double* f1, long long ncell);
+    void cuda_mg_gauss_seidel(int ngrid, int ngridmax, int ncoarse,
+                              double dx2, int color, int safe_mode);
+    void cuda_mg_residual(int ngrid, int ngridmax, int ncoarse,
+                          double oneoverdx2, double dtwondim, double dx2_norm,
+                          double* norm2, int compute_norm);
+    void cuda_mg_free(void);
+    void cuda_mg_finalize(void);
+    int  cuda_mg_is_ready(void);
 #ifdef __cplusplus
 }
 #endif
@@ -137,10 +168,10 @@ extern "C" {
 #ifdef __cplusplus
 StreamSlot* get_pool();
 bool is_pool_initialized();
-void pool_ensure_hydro_buffers(int slot, int ngrid);
-void pool_ensure_hydro_inter_buffers(int slot, int ngrid);
-void pool_ensure_stencil_buffers(int slot, int ngrid, int n_interp);
-void pool_ensure_reduce_buffers(int slot, int ngrid);
+bool pool_ensure_hydro_buffers(int slot, int ngrid);
+bool pool_ensure_hydro_inter_buffers(int slot, int ngrid);
+bool pool_ensure_stencil_buffers(int slot, int ngrid, int n_interp);
+bool pool_ensure_reduce_buffers(int slot, int ngrid);
 void pool_ensure_pinned_buffers(int slot, int ngrid);
 cudaStream_t cuda_get_stream_internal(int slot);
 // GPU-resident mesh array accessors
