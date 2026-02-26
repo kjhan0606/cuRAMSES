@@ -19,7 +19,7 @@ NPRE = 8
 NVAR = 11
 NENER = 0
 SOLVER = hydro
-PATCH = ../patch/cuRamses
+PATCH = ../patch/Horizon5-master-2
 EXEC = ramses_final
 #############################################################################
 GITBRANCH = $(shell git rev-parse --abbrev-ref HEAD)
@@ -29,16 +29,15 @@ BUILDDATE = $(shell date +"%D-%T")
 DEFINES = -DNVECTOR=$(NVECTOR) -DNDIM=$(NDIM) -DNPRE=$(NPRE) -DNENER=$(NENER) -DNVAR=$(NVAR) \
           -DSOLVER=$(SOLVER)
 #############################################################################
-# Fortran compiler options and directives
-
-# --- MPI, pgf90 syntax ------------------------------
-#F90 = mpif90 -O3
-#FFLAGS = -Mpreprocess $(DEFINES) -Mbackslash
-
-# --- MPI, ifort syntax ------------------------------
-#F90 = mpif90 -openmp #-xMIC-AVX512
-F90 = mpiifx -qopenmp -march=core-avx2
-FFLAGS = -cpp -O3 $(DEFINES) -DNOSYSTEM -DLONGINT -DQUADHILBERT -DOUTPUT_PARTICLE_POTENTIAL
+# Fortran compiler: always Intel ifx
+#   Default:      64-bit Morton key (level <= 22)
+#   MORTON128=1:  128-bit Morton key via dual-int8 mkey_t (level <= 43)
+#############################################################################
+F90 = mpiifx -qopenmp
+FFLAGS = -fpp -O3 $(DEFINES) -DLONGINT -DQUADHILBERT -DOUTPUT_PARTICLE_POTENTIAL
+ifdef MORTON128
+  FFLAGS += -DMORTON128
+endif
 
 #############################################################################
 # HDF5 parallel I/O support (build with: make HDF5=1)
@@ -82,6 +81,18 @@ else
 endif
 
 #############################################################################
+# FFTW3 CPU direct Poisson solver (build with: make USE_FFTW=1)
+#############################################################################
+ifdef USE_FFTW
+  FFTW3_DIR = $(HOME)/local
+  FFLAGS += -DUSE_FFTW -I$(FFTW3_DIR)/include
+  LIBS_FFTW = -L$(FFTW3_DIR)/lib -lfftw3_mpi -lfftw3_omp -lfftw3 -lm \
+              -Wl,-rpath,$(FFTW3_DIR)/lib
+else
+  LIBS_FFTW =
+endif
+
+#############################################################################
 MOD = mod
 #############################################################################
 # MPI librairies
@@ -92,16 +103,15 @@ LIBMPI =
 LIBCUDA = -L/opt/cuda/lib  -lm -lcuda -lcudart
 
 LIBGRACKLE = -lgrackle -lhdf5 -lz
-LIBS = $(LIBMPI) $(LIBS_HDF5) $(LIBS_CUDA)
+LIBS = $(LIBMPI) $(LIBS_HDF5) $(LIBS_CUDA) $(LIBS_FFTW)
 #############################################################################
 # Sources directories are searched in this exact order
-#VPATH = ../patch/cuda:../patch/oct_tree:$(PATCH):../$(SOLVER):../aton:../hydro:../pm:../poisson:../amr
-VPATH = ../patch/cuRamses:$(PATCH):../$(SOLVER):../aton:../hydro:../pm:../poisson:../amr
+VPATH = ../patch/cuda:../patch/oct_tree:$(PATCH):../$(SOLVER):../aton:../hydro:../pm:../poisson:../amr
 #############################################################################
 # All objects
 MODOBJ	= amr_parameters.jaehyun.o amr_commons.kjhan.o random.o pm_parameters.o pm_commons.o poisson_parameters.o \
 	 poisson_commons.o hydro_parameters.o hydro_commons.o cooling_module.o bisection.o ksection.o sparse_mat.o \
-	 morton_keys.o morton_hash.o \
+	 morton_keys.o morton_hash.o neutrino_commons.o dark_energy_commons.o \
 	 clfind_commons.o gadgetreadfile.o write_makefile.o write_gitinfo.o \
 	 $(HDF5_MODOBJ) $(CUDA_MODOBJ)
 

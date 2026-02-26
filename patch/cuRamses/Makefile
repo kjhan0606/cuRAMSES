@@ -1,32 +1,46 @@
 #############################################################################
-# cuRAMSES Makefile — standalone build from flat source directory
-# All sources in ../patch/cuRamses/
+# If you have problems with this makefile, contact Romain.Teyssier@gmail.com
 #############################################################################
 # Compilation time parameters
+#NVECTOR = 32
+#NDIM = 3
+#NPRE = 8
+#NVAR = 16
+#NENER = 0
+#SOLVER = hydro
+#PATCH = ../patch/Horizon5-master
+#EXEC = ramses_ch
+##################################
+# Yohan's patch
+#NVECTOR = 32
 NVECTOR = 32
 NDIM = 3
 NPRE = 8
 NVAR = 11
 NENER = 0
 SOLVER = hydro
-PATCH = ../patch/cuRamses
+PATCH = ../patch/Horizon5-master-2
 EXEC = ramses_final
 #############################################################################
-GITBRANCH = cuRamses-backup
-GITHASH = standalone
-GITREPO = local
+GITBRANCH = $(shell git rev-parse --abbrev-ref HEAD)
+GITHASH = $(shell git log --pretty=format:'%H' -n 1)
+GITREPO = $(shell git config --get remote.origin.url)
 BUILDDATE = $(shell date +"%D-%T")
 DEFINES = -DNVECTOR=$(NVECTOR) -DNDIM=$(NDIM) -DNPRE=$(NPRE) -DNENER=$(NENER) -DNVAR=$(NVAR) \
           -DSOLVER=$(SOLVER)
 #############################################################################
-# Fortran compiler options and directives
-
-# --- MPI, ifort syntax ------------------------------
-F90 = mpiifx -qopenmp -march=core-avx2
-FFLAGS = -cpp -O3 $(DEFINES) -DNOSYSTEM -DLONGINT -DQUADHILBERT -DOUTPUT_PARTICLE_POTENTIAL
+# Fortran compiler: always Intel ifx
+#   Default:      64-bit Morton key (level <= 22)
+#   MORTON128=1:  128-bit Morton key via dual-int8 mkey_t (level <= 43)
+#############################################################################
+F90 = mpiifx -qopenmp
+FFLAGS = -fpp -O3 $(DEFINES) -DLONGINT -DQUADHILBERT -DOUTPUT_PARTICLE_POTENTIAL
+ifdef MORTON128
+  FFLAGS += -DMORTON128
+endif
 
 #############################################################################
-# HDF5 parallel I/O support (build with: make -f Makefile.cuRamses HDF5=1)
+# HDF5 parallel I/O support (build with: make HDF5=1)
 #############################################################################
 ifdef HDF5
   HDF5_DIR = $(HOME)/local/hdf5
@@ -41,17 +55,25 @@ else
 endif
 
 #############################################################################
-# CUDA GPU hydro support (build with: make -f Makefile.cuRamses USE_CUDA=1)
+# CUDA GPU hydro support (build with: make USE_CUDA=1)
 #############################################################################
 ifdef USE_CUDA
   CUDA_DIR = /opt/ohpc/pub/cuda/13.0.2
   NVCC = $(CUDA_DIR)/bin/nvcc
   CUDA_ARCH = -gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 -gencode arch=compute_90,code=sm_90
-  NVCCFLAGS = -O3 $(CUDA_ARCH) -DNDIM=$(NDIM) -DNVAR=$(NVAR) -DNVECTOR=$(NVECTOR)
+  N_CUDA_STREAMS ?= 1
+  NVCCFLAGS = -O3 $(CUDA_ARCH) -DNDIM=$(NDIM) -DNVAR=$(NVAR) -DNVECTOR=$(NVECTOR) -DN_STREAMS=$(N_CUDA_STREAMS)
   FFLAGS += -DHYDRO_CUDA
-  LIBS_CUDA = -L$(CUDA_DIR)/lib64 -lcudart -lstdc++ -Wl,-rpath,$(CUDA_DIR)/lib64
-  CUDA_MODOBJ = cuda_commons.o hydro_cuda_interface.o
-  CUDA_OBJS = cuda_stream_pool.o hydro_cuda_kernels.o
+  LIBS_CUDA = -L$(CUDA_DIR)/lib64 -lcudart -lcufft -lstdc++ -Wl,-rpath,$(CUDA_DIR)/lib64
+  CUDA_MODOBJ = cuda_commons.o hydro_cuda_interface.o poisson_cuda_interface.o sink_cuda_interface.o
+  CUDA_OBJS = cuda_stream_pool.o hydro_cuda_kernels.o poisson_cuda_kernels.o sink_cuda_kernels.o
+ifdef USE_CUFFTMP
+  CUFFTMP_DIR = $(HOME)/miniconda3/lib/python3.13/site-packages/nvidia/cufftmp/cu12
+  FFLAGS += -DUSE_CUFFTMP
+  NVCCFLAGS += -DUSE_CUFFTMP
+  LIBS_CUDA += -L$(CUFFTMP_DIR)/lib -lcufftMp \
+               -Wl,-rpath,$(CUFFTMP_DIR)/lib
+endif
 else
   LIBS_CUDA =
   CUDA_MODOBJ =
@@ -59,20 +81,37 @@ else
 endif
 
 #############################################################################
+# FFTW3 CPU direct Poisson solver (build with: make USE_FFTW=1)
+#############################################################################
+ifdef USE_FFTW
+  FFTW3_DIR = $(HOME)/local
+  FFLAGS += -DUSE_FFTW -I$(FFTW3_DIR)/include
+  LIBS_FFTW = -L$(FFTW3_DIR)/lib -lfftw3_mpi -lfftw3_omp -lfftw3 -lm \
+              -Wl,-rpath,$(FFTW3_DIR)/lib
+else
+  LIBS_FFTW =
+endif
+
+#############################################################################
 MOD = mod
 #############################################################################
 # MPI librairies
 LIBMPI =
+#LIBMPI = -lfmpi -lmpi -lelan
 
-LIBS = $(LIBMPI) $(LIBS_HDF5) $(LIBS_CUDA)
+# --- CUDA libraries, for Titane ---
+LIBCUDA = -L/opt/cuda/lib  -lm -lcuda -lcudart
+
+LIBGRACKLE = -lgrackle -lhdf5 -lz
+LIBS = $(LIBMPI) $(LIBS_HDF5) $(LIBS_CUDA) $(LIBS_FFTW)
 #############################################################################
-# Sources directories — single flat directory containing all sources
-VPATH = ../patch/cuRamses
+# Sources directories are searched in this exact order
+VPATH = ../patch/cuda:../patch/oct_tree:$(PATCH):../$(SOLVER):../aton:../hydro:../pm:../poisson:../amr
 #############################################################################
 # All objects
 MODOBJ	= amr_parameters.jaehyun.o amr_commons.kjhan.o random.o pm_parameters.o pm_commons.o poisson_parameters.o \
 	 poisson_commons.o hydro_parameters.o hydro_commons.o cooling_module.o bisection.o ksection.o sparse_mat.o \
-	 morton_keys.o morton_hash.o \
+	 morton_keys.o morton_hash.o neutrino_commons.o dark_energy_commons.o \
 	 clfind_commons.o gadgetreadfile.o write_makefile.o write_gitinfo.o \
 	 $(HDF5_MODOBJ) $(CUDA_MODOBJ)
 
@@ -87,6 +126,8 @@ PMOBJ = init_part.o output_part.o rho_fine.kjhan.o synchro_fine.kjhan.o move_fin
 		clump_finder.o clump_merger.o \
         flag_formation_sites.o init_sink.o output_sink.o
 # Poisson solver objects
+#POISSONOBJ = init_poisson.o phi_fine_cg.kisti.o interpol_phi.kjhan.o force_fine.kjhan.o multigrid_coarse.kjhan.o multigrid_fine_commons.o \
+             multigrid_fine_fine.kisti.o multigrid_fine_coarse.kisti.o gravana.o boundary_potential.o rho_ana.kjhan.o output_poisson.o
 POISSONOBJ = init_poisson.o phi_fine_cg.kjhan.o interpol_phi.kjhan.o force_fine.kjhan.o multigrid_coarse.kjhan.o multigrid_fine_commons.o \
              multigrid_fine_fine.kjhan.o multigrid_fine_coarse.kjhan.o gravana.o boundary_potential.kjhan.o rho_ana.kjhan.o output_poisson.o
 # Hydro objects
@@ -95,24 +136,39 @@ HYDROOBJ = init_hydro.o init_flow_fine.o write_screen.o output_hydro.o courant_f
            boundana.o read_hydro_params.o synchro_hydro_fine.kjhan.o
 # All objects
 AMRLIB = $(AMROBJ) $(HYDROOBJ) $(PMOBJ) $(POISSONOBJ)
+# ATON objects
+ATON_MODOBJ = timing.o radiation_commons.o rad_step.o
+ATON_OBJ = observe.o init_radiation.o rad_init.o rad_boundary.o rad_stars.o rad_backup.o ../aton/atonlib/libaton.a
 #############################################################################
 ramses:	$(MODOBJ) $(AMRLIB) $(CUDA_OBJS) ramses.o
 	$(F90) $(MODOBJ) $(AMRLIB) $(CUDA_OBJS) ramses.o -o $(EXEC)$(NDIM)d $(LIBS)
-	rm -f write_makefile.f90
+	rm write_makefile.f90
+#	rm write_patch.f90
+ramses_aton: $(MODOBJ) $(ATON_MODOBJ) $(AMRLIB) $(ATON_OBJ) ramses.o
+	$(F90) $(MODOBJ) $(ATON_MODOBJ) $(AMRLIB) $(ATON_OBJ) ramses.o -o $(EXEC)$(NDIM)d $(LIBS) $(LIBCUDA)
+	rm write_makefile.f90
+#	rm write_patch.f90
 #############################################################################
 write_gitinfo.o: FORCE
 	$(F90) $(FFLAGS) -DPATCH=\'$(PATCH)\' -DGITBRANCH=\'$(GITBRANCH)\' -DGITHASH=\'"$(GITHASH)"\' \
- -DGITREPO=\'$(GITREPO)\' -DBUILDDATE=\'"$(BUILDDATE)"\' -c ../patch/cuRamses/write_gitinfo.f90 -o $@
+ -DGITREPO=\'$(GITREPO)\' -DBUILDDATE=\'"$(BUILDDATE)"\' -c ../amr/write_gitinfo.f90 -o $@
 write_makefile.o: FORCE
 	../utils/scripts/cr_write_makefile.sh $(MAKEFILE_LIST)
 	$(F90) $(FFLAGS) -c write_makefile.f90 -o $@
+write_patch.o: FORCE
+	../utils/scripts/cr_write_patch.sh $(PATCH)
+	$(F90) $(FFLAGS) -c write_patch.f90 -o $@
 %.o:%.f90
 	$(F90) $(FFLAGS) -c $^ -o $@
 ifdef USE_CUDA
 %.o:%.cu
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 hydro_cuda_kernels.o: cuda_stream_pool.o
+poisson_cuda_kernels.o: cuda_stream_pool.o
+sink_cuda_kernels.o: cuda_stream_pool.o
 hydro_cuda_interface.o: cuda_commons.o
+poisson_cuda_interface.o: cuda_commons.o
+sink_cuda_interface.o: cuda_commons.o
 cuda_commons.o: amr_commons.kjhan.o
 endif
 FORCE:
