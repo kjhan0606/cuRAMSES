@@ -106,7 +106,7 @@ LIBGRACKLE = -lgrackle -lhdf5 -lz
 LIBS = $(LIBMPI) $(LIBS_HDF5) $(LIBS_CUDA) $(LIBS_FFTW)
 #############################################################################
 # Sources directories are searched in this exact order
-VPATH = ../patch/cuda:../patch/oct_tree:$(PATCH):../$(SOLVER):../aton:../hydro:../pm:../poisson:../amr
+VPATH = ../patch/cuRamses:$(PATCH):../$(SOLVER):../aton:../hydro:../pm:../poisson:../amr
 #############################################################################
 # All objects
 MODOBJ	= amr_parameters.jaehyun.o amr_commons.kjhan.o random.o pm_parameters.o pm_commons.o poisson_parameters.o \
@@ -127,7 +127,7 @@ PMOBJ = init_part.o output_part.o rho_fine.kjhan.o synchro_fine.kjhan.o move_fin
         flag_formation_sites.o init_sink.o output_sink.o
 # Poisson solver objects
 #POISSONOBJ = init_poisson.o phi_fine_cg.kisti.o interpol_phi.kjhan.o force_fine.kjhan.o multigrid_coarse.kjhan.o multigrid_fine_commons.o \
-             multigrid_fine_fine.kisti.o multigrid_fine_coarse.kisti.o gravana.o boundary_potential.o rho_ana.kjhan.o output_poisson.o
+#             multigrid_fine_fine.kisti.o multigrid_fine_coarse.kisti.o gravana.o boundary_potential.o rho_ana.kjhan.o output_poisson.o
 POISSONOBJ = init_poisson.o phi_fine_cg.kjhan.o interpol_phi.kjhan.o force_fine.kjhan.o multigrid_coarse.kjhan.o multigrid_fine_commons.o \
              multigrid_fine_fine.kjhan.o multigrid_fine_coarse.kjhan.o gravana.o boundary_potential.kjhan.o rho_ana.kjhan.o output_poisson.o
 # Hydro objects
@@ -160,6 +160,9 @@ write_patch.o: FORCE
 	$(F90) $(FFLAGS) -c write_patch.f90 -o $@
 %.o:%.f90
 	$(F90) $(FFLAGS) -c $^ -o $@
+# ifx ICE workaround: phi_fine_cg.kisti crashes with -qopenmp
+phi_fine_cg.kisti.o: phi_fine_cg.kisti.f90
+	mpiifx $(FFLAGS) -c $^ -o $@
 ifdef USE_CUDA
 %.o:%.cu
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
