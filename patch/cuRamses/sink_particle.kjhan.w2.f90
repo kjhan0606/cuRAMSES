@@ -420,6 +420,17 @@ subroutine kjhan_make_sink(ilevel)
              ntot=ntot+1
              iokthread(mythread) = iokthread(mythread) + 1
              flag2(ind_cell(i))=1
+             ! Diagnostic: print density info for new sink candidates
+             d=uold(ind_cell(i),1)
+             temp=max(uold(ind_cell(i),5)*(gamma-1.0),smallc**2)
+             d_jeans=temp*3.1415926/(4.0*dx_loc)**2/factG
+             x=(xg(ind_grid(i),1)+xc(ind,1)-skip_loc(1))*scale
+             y=(xg(ind_grid(i),2)+xc(ind,2)-skip_loc(2))*scale
+             z=(xg(ind_grid(i),3)+xc(ind,3)-skip_loc(3))*scale
+             write(*,'(A,I5,A,3ES14.6,A,ES22.15,A,ES22.15,A,ES22.15,A,F8.4)') &
+                ' SINK_DIAG myid=',myid,' pos=',x,y,z, &
+                ' d=',d,' d_jeans=',d_jeans,' d_star=',d_star, &
+                ' d/d_jeans=',d/d_jeans
           endif
        enddo
      end do
