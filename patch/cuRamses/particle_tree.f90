@@ -24,11 +24,6 @@ subroutine init_tree
   logical,dimension(1:nvector),save::ok=.true.
   real(dp),dimension(1:3)::skip_loc
   real(dp)::scale
-  ! Diagnostic variables
-  integer :: diag_ilev, diag_icpu2, diag_igrid2, diag_jgrid2
-  integer :: diag_npart_loc(nlevelmax), diag_npart_tot(nlevelmax)
-  integer :: diag_nstar_loc(nlevelmax), diag_nstar_tot(nlevelmax)
-  integer :: diag_ipart2
 
   if(verbose)write(*,*)'  Entering init_tree'
 
@@ -164,42 +159,6 @@ subroutine init_tree
   end do
   ! Final migration for levelmin
   call virtual_tree_fine(levelmin)
-
-  ! Diagnostic: count particles per level after init_tree
-  diag_npart_loc = 0
-  diag_nstar_loc = 0
-  do diag_ilev = 1, nlevelmax
-     do diag_icpu2 = 1, ncpu
-        diag_igrid2 = headl(diag_icpu2, diag_ilev)
-        do diag_jgrid2 = 1, numbl(diag_icpu2, diag_ilev)
-           diag_npart_loc(diag_ilev) = diag_npart_loc(diag_ilev) + numbp(diag_igrid2)
-           ! Count star particles
-           diag_ipart2 = headp(diag_igrid2)
-           do while(diag_ipart2 > 0)
-              if(tp(diag_ipart2) /= 0d0) diag_nstar_loc(diag_ilev) = diag_nstar_loc(diag_ilev) + 1
-              diag_ipart2 = nextp(diag_ipart2)
-           end do
-           diag_igrid2 = next(diag_igrid2)
-        end do
-     end do
-  end do
-#ifndef WITHOUTMPI
-  call MPI_ALLREDUCE(diag_npart_loc, diag_npart_tot, nlevelmax, MPI_INTEGER, MPI_SUM, MPI_COMM_WORLD, info)
-  call MPI_ALLREDUCE(diag_nstar_loc, diag_nstar_tot, nlevelmax, MPI_INTEGER, MPI_SUM, MPI_COMM_WORLD, info)
-#else
-  diag_npart_tot = diag_npart_loc
-  diag_nstar_tot = diag_nstar_loc
-#endif
-  if(myid == 1) then
-     write(*,*) '=== init_tree diagnostic: particles per level ==='
-     do diag_ilev = 1, nlevelmax
-        if(diag_npart_tot(diag_ilev) > 0) then
-           write(*,'(A,I3,A,I12,A,I12)') ' Level', diag_ilev, &
-                ' npart=', diag_npart_tot(diag_ilev), ' nstar=', diag_nstar_tot(diag_ilev)
-        end if
-     end do
-     write(*,*) '================================================='
-  end if
 
 end subroutine init_tree
 !################################################################

@@ -325,18 +325,18 @@ The k-section tree enables \textbf{hierarchical MPI exchange} where communicatio
 \label{fig:ksection_domains}
 \end{figure}
 
-Figure~\ref{fig:ksection_progressive} illustrates the progressive nature of the k-section tree construction.  Starting from the full simulation domain, the tree is built by recursively bisecting (or $k$-secting) along successive coordinate axes.  In this example with $k_1 \times k_2 \times k_3 = 3 \times 2 \times 2 = 12$ CPUs, the decomposition proceeds in three stages:
+Figure~\ref{fig:ksection_progressive} illustrates the progressive nature of the recursive k-section tree construction.  Starting from the undivided simulation domain~(a), the tree is built by recursively $k$-secting along successive coordinate axes.  In this example with $k_1 \times k_2 \times k_3 = 3 \times 2 \times 2 = 12$ CPUs, the decomposition proceeds in three stages:
 \begin{enumerate}[nosep]
   \item \textbf{Level~1 ($k_1=3$)}: The domain is split into 3 slabs along the $x$-axis.
   \item \textbf{Level~2 ($k_2=2$)}: Each slab is bisected along the $y$-axis, producing 6 subdomains.
   \item \textbf{Level~3 ($k_3=2$)}: Each subdomain is bisected along the $z$-axis, yielding the final 12 subdomains.
 \end{enumerate}
-The split positions at each level are determined by the load-balancing histogram to ensure equal computational cost per subdomain, resulting in non-uniform subdomain volumes that reflect the local workload.  The color hue in Figure~\ref{fig:ksection_progressive} encodes the $x$-slab membership (red/green/blue), with saturation and brightness variations indicating the $y$ and $z$ subdivisions, respectively.
+The split positions at each level are determined by the load-balancing histogram to ensure equal computational cost per subdomain, resulting in non-uniform subdomain volumes that reflect the local workload.  The colour hue in Figure~\ref{fig:ksection_progressive} encodes the $x$-slab membership (red/green/blue), with saturation and brightness variations indicating the $y$ and $z$ subdivisions.  Below each panel, the corresponding recursive k-section tree is shown, with leaf nodes coloured to match their domain.
 
 \begin{figure}[ht]
 \centering
 \includegraphics[width=\textwidth]{ksection_progressive.png}
-\caption{Progressive k-section decomposition for $k_1 \times k_2 \times k_3 = 3 \times 2 \times 2 = 12$ CPUs with non-uniform split positions.  \textbf{Left}: first split into 3 slabs along $x$ with unequal widths.  \textbf{Center}: each slab bisected along $y$ at load-dependent positions ($3 \times 2 = 6$ subdomains).  \textbf{Right}: final bisection along $z$ ($3 \times 2 \times 2 = 12$ subdomains).  Subdomain volumes vary by ${\sim}10$--$30\%$, reflecting load-balanced wall placement.  Each face shows projected column density $\log_{10}(1+\Sigma)$ from a $4096^3$ TSC density field.}
+\caption{Progressive recursive k-section decomposition for $k_1 \times k_2 \times k_3 = 3 \times 2 \times 2 = 12$ CPUs. (a)~Undivided simulation domain. (b)~First split into 3 slabs along $x$. (c)~Each slab bisected along $y$ ($3 \times 2 = 6$ subdomains). (d)~Final bisection along $z$ ($3 \times 2 \times 2 = 12$ subdomains). Below each panel, the corresponding k-section tree shows the hierarchical structure; leaf node colours match domain colours. Subdomain volumes vary by ${\sim}10$--$30\%$, reflecting load-balanced wall placement.  Each face shows projected column density $\log_{10}(1+\Sigma)$ from a $4096^3$ TSC density field.}
 \label{fig:ksection_progressive}
 \end{figure}
 
@@ -546,10 +546,31 @@ The \texttt{nbor} array (6 neighbor pointers per grid) was replaced with a Morto
 
 \section{Morton Key}
 
-A 64-bit Morton key is computed by interleaving the 3D integer coordinates (21 bits per dimension):
+A Morton key is computed by interleaving the 3D integer coordinates:
 \[
 \text{key} = \text{interleave}\bigl(\lfloor x_g \cdot 2^{l-1} \rfloor,\; \lfloor y_g \cdot 2^{l-1} \rfloor,\; \lfloor z_g \cdot 2^{l-1} \rfloor\bigr)
 \]
+
+Two precision modes are available, selected at compile time:
+
+\begin{center}
+\begin{tabular}{lcccc}
+\hline
+Mode & Key size & Bits/coord & Max level ($n_x=1$) & Compiler \\
+\hline
+64-bit (default) & 8 bytes & 21 & 22 & ifx or gfortran \\
+128-bit (\texttt{MORTON128=1}) & 16 bytes & 42 & 43 & gfortran only \\
+\hline
+\end{tabular}
+\end{center}
+
+\noindent Build commands:
+\begin{verbatim}
+make HDF5=1                 # 64-bit Morton (ifx, ~2.5x faster)
+make HDF5=1 MORTON128=1     # 128-bit Morton (gfortran)
+\end{verbatim}
+
+\noindent For $n_x=4$ (e.g., HR5), the maximum level is reduced by 2: \texttt{levelmax}$\le$20 (64-bit) or $\le$41 (128-bit). All routines use the parametric kind \texttt{mkb}, so no code changes are needed beyond the preprocessor flag.
 
 \section{Hash Table}
 
@@ -625,9 +646,14 @@ Several large arrays were eliminated or converted to on-demand allocation to red
 \texttt{bisec\_ind\_cell} + \texttt{cell\_level} & On-demand alloc/dealloc & ${\sim}320$\,MB \\
 \texttt{defrag\_map} & Local scratch during defrag & minor \\
 \texttt{nbor} & \texttt{allocate(1:1,1:1)} (Morton) & ${\sim}240$\,MB \\
+\texttt{sink arrays} & \texttt{nsinkmax} 4M$\to$2000 & ${\sim}15$\,GB/rank \\
 \bottomrule
 \end{tabular}
 \end{center}
+
+\section{Sink Particle Array Reduction}
+
+The original \texttt{nsinkmax} was hardcoded to 4,000,000, allocating ${\sim}15$\,GB per rank for sink-related arrays. Since typical simulations use $O(10)$--$O(100)$ sink particles, the default was reduced to 2000 (overridable via \texttt{nsinkmax} in \texttt{\&AMR\_PARAMS}). The \texttt{MPI\_ALLREDUCE} calls in \texttt{synchro\_fine} and \texttt{move\_fine} were also changed to use \texttt{nsink} instead of \texttt{nsinkmax}, reducing message size by up to 333,000$\times$.
 
 
 %======================================================
@@ -1293,6 +1319,236 @@ The merged red-black exchange introduces a minor change in the energy conservati
 
 
 %======================================================
+\chapter{SNII Feedback K-Section Exchange}
+\label{ch:snii-ksection}
+%======================================================
+
+When \texttt{ordering='ksection'}, the SNII kinetic feedback routine (\texttt{kinetic\_feedback} in \texttt{feedback.kjhan3.f90}) replaces all \texttt{MPI\_ALLREDUCE} calls with a 3-stage k-section overlap exchange, eliminating global synchronization.
+
+\section{3-Stage Exchange}
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Exchange~1 (Overlap Broadcast)}: Each CPU broadcasts its local SN events to all CPUs whose domain overlaps the SN blast radius. Uses \texttt{ksection\_exchange\_dp\_overlap} with bounding box $[\mathbf{x}_\mathrm{SN} - r_\mathrm{SN},\; \mathbf{x}_\mathrm{SN} + r_\mathrm{SN}]$ and \texttt{periodic=.true.}. Carries $9 + n_\mathrm{elt}$ fields per SN event (\texttt{x}, \texttt{v}, \texttt{m}, \texttt{Z}, \texttt{NbSN}, \texttt{ce}).
+  \item \textbf{Exchange~2 (Exclusive $\to$ Owner)}: Each CPU computes its local contribution to the Sedov blast integrals (\texttt{vol\_gas}, \texttt{mloadSN}, \texttt{ZloadSN}, \texttt{vloadSN}, \texttt{dq}, \texttt{u2Blast}, \texttt{celoadSN}) and sends them to the SN owner CPU via \texttt{ksection\_exchange\_dp}. The owner aggregates all contributions.
+  \item \textbf{Exchange~3 (Overlap Broadcast)}: The owner broadcasts the aggregated blast parameters back to all CPUs in the blast region. Uses \texttt{ksection\_exchange\_dp\_overlap} with the same bounding box.
+\end{enumerate}
+
+\section{Dispatch}
+
+\begin{lstlisting}[language=Fortran,basicstyle=\ttfamily\small]
+if(TRIM(ordering)=='ksection') then
+   call kinetic_feedback_ksec(...)  ! 3-stage exchange
+else
+   call kinetic_feedback_allreduce(...)  ! packed ALLREDUCE
+end if
+\end{lstlisting}
+
+\section{Verification}
+
+The k-section and Hilbert paths produce identical physical results: \texttt{epot}, \texttt{ekin}, and \texttt{eint} match to full precision.
+
+
+%======================================================
+\chapter{Sink Particle K-Section Exchange}
+\label{ch:sink-ksection}
+%======================================================
+
+When \texttt{ordering='ksection'}, the 8 packed \texttt{MPI\_ALLREDUCE(MPI\_SUM)} calls in \texttt{sink\_particle.kjhan.f90} are replaced with a 2-stage k-section exchange via the utility subroutine \texttt{sink\_ksec\_reduce\_sum}.
+
+\section{Algorithm: 2-Stage K-Section Reduce-Sum}
+
+Since \texttt{MPI\_ALLREDUCE} = reduce + broadcast, the replacement decomposes this into:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Stage~1 (Exclusive $\to$ Owner)}: Each CPU sends its non-zero partial sums to the sink's owner CPU. The owner is determined by \texttt{cmp\_ksection\_cpumap(xsink)}. A sparsity optimization skips sinks with zero contribution. Uses \texttt{ksection\_exchange\_dp} with $n_\mathrm{fields}+1$ properties per item (sink index + field values).
+  \item \textbf{Stage~2 (Overlap Broadcast $\to$ All)}: Each owner broadcasts its accumulated result to all CPUs using \texttt{ksection\_exchange\_dp\_overlap} with a full-domain bounding box $[0, \texttt{boxlen}]^3$ and \texttt{periodic=.true.}, ensuring all CPUs receive the global sum.
+\end{enumerate}
+
+\section{Replaced Call Sites}
+
+\begin{center}
+\begin{tabular}{clcl}
+\toprule
+\textbf{\#} & \textbf{Subroutine} & \textbf{nfields} & \textbf{Arrays} \\
+\midrule
+1 & \texttt{kjhan\_make\_sink} & 15 & oksink, msink, xsink(3), vsink(3), tsink, dMsmbh, Esave, bhspin(3), spinmag \\
+2 & \texttt{bondi\_hoyle} (1st) & 3 & oksink, c2sink, v2sink \\
+3 & \texttt{bondi\_hoyle} (2nd) & 9 & wdens, wvol, wc2, wmom(3), jsink(3) \\
+4 & \texttt{grow\_bondi} & 7 & msink, vsink(3), dMBH\_coarse, dMEd\_coarse, dMsmbh \\
+5 & \texttt{grow\_jeans} & 4 & msink, vsink(3) \\
+6 & \texttt{AGN\_feedback} & 1 & Esave \\
+7 & \texttt{AGN\_blast} & 5 & vol\_gas, mass\_gas, mAGN, ZAGN, psy\_norm \\
+8 & \texttt{update\_sink} & dynamic & sink\_stat: $(n_\mathrm{levelmax} - n_\mathrm{levelmin} + 1) \times 7$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Preserved ALLREDUCE Calls}
+
+The following calls are \emph{not} replaced because they use different operations, data types, or dynamic sizes:
+
+\begin{itemize}[leftmargin=2em]
+  \item Scalar/integer reductions (\texttt{ntot}, \texttt{ntot\_sink\_cpu}, \texttt{numbp\_free})
+  \item \texttt{MPI\_INTEGER} reduction (\texttt{idsink\_new})
+  \item \texttt{MPI\_MIN} reduction (\texttt{dMsmbh\_new})
+  \item Dynamic-size mixed-type reductions (\texttt{x\_tmp}, \texttt{dens\_tmp}, \texttt{flag\_tmp})
+\end{itemize}
+
+\section{Verification}
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Test} & \textbf{CPUs} & \textbf{econs} \\
+\midrule
+K-section & 12 & 7.65E-04 \\
+Hilbert fallback & 4 & 7.47E-04 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Both match pre-replacement values exactly.
+
+
+%======================================================
+\chapter{MPI\_ALLREDUCE Packing}
+\label{ch:allreduce-packing}
+%======================================================
+
+Multiple individual \texttt{MPI\_ALLREDUCE} calls operating on arrays of the same size and reduction operation can be packed into a single call, reducing MPI latency overhead proportionally.
+
+\section{AGN Feedback (average\_AGN)}
+
+In \texttt{sink\_particle.kjhan.f90}, the \texttt{average\_AGN} subroutine synchronizes five per-sink arrays (\texttt{vol\_gas}, \texttt{mass\_gas}, \texttt{mAGN}, \texttt{ZAGN}, \texttt{psy\_norm}) across all ranks. The five individual \texttt{MPI\_ALLREDUCE} calls were packed into a single call with buffer size $5 \times \texttt{nsink}$.
+
+\begin{remark}[dMsmbh + Esave]
+The \texttt{dMsmbh\_new} (\texttt{MPI\_MIN}) and \texttt{Esave\_new} (\texttt{MPI\_SUM}) reductions use different operations and therefore cannot be packed together.
+\end{remark}
+
+\section{SNII Feedback --- Hilbert Fallback Path}
+
+When \texttt{ordering} $\ne$ \texttt{'ksection'}, the SNII feedback in \texttt{feedback.kjhan3.f90} uses \texttt{MPI\_ALLREDUCE} instead of the k-section overlap exchange. Two packing optimizations were applied:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{SN property exchange} (6$\to$1): \texttt{xSN}, \texttt{vSN}, \texttt{mSN}, \texttt{ZSN}, \texttt{NbSN}, \texttt{ceSN} packed into a single buffer of size $n_\mathrm{SN,tot} \times (9 + n_\mathrm{elt})$.
+  \item \textbf{Sedov blast exchange} (7$\to$1): \texttt{vol\_gas}, \texttt{mloadSN}, \texttt{ZloadSN}, \texttt{vloadSN}, \texttt{dq}, \texttt{u2Blast}, \texttt{celoadSN} packed into a single buffer of size $n_\mathrm{SN,tot} \times (12 + n_\mathrm{elt})$.
+\end{enumerate}
+
+\section{Summary}
+
+\begin{center}
+\begin{tabular}{llcc}
+\toprule
+\textbf{Location} & \textbf{Subroutine} & \textbf{Before} & \textbf{After} \\
+\midrule
+\texttt{sink\_particle.kjhan.f90} & \texttt{average\_AGN} & 5 calls & 1 call \\
+\texttt{feedback.kjhan3.f90} & \texttt{kinetic\_feedback} & 6 calls & 1 call \\
+\texttt{feedback.kjhan3.f90} & \texttt{average\_SN} & 7 calls & 1 call \\
+\midrule
+\multicolumn{2}{l}{Total ALLREDUCE removed} & 18 & 3 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Verification: econs = 7.65E-04 (ksection, 12~CPU) and 7.47E-04 (Hilbert, 4~CPU), identical to pre-packing results. The Hilbert path SNII ALLREDUCE time decreased from 4.25\,ms to 1.16\,ms (3.7$\times$ speedup).
+
+
+%======================================================
+\chapter{AGN Feedback Spatial Binning}
+\label{ch:agn-binning}
+%======================================================
+
+The AGN feedback routines \texttt{average\_AGN} and \texttt{AGN\_blast} in \texttt{sink\_particle.kjhan.f90} iterate over all AGN sinks for every leaf cell, resulting in $O(n_\mathrm{cells} \times n_\mathrm{AGN})$ complexity. With 32K sinks, profiling showed \texttt{average\_AGN} consuming 177\,s (68.5\%) and \texttt{AGN\_blast} consuming 73\,s (27.3\%) of the AGN feedback time.
+
+The same spatial binning technique proven in the SNII feedback optimization (Chapter~\ref{ch:snii-ksec}) was applied: the simulation domain is divided into $n_\mathrm{bin}^3$ cells, each AGN sink is inserted into a linked list indexed by its bin, and the cell loop checks only the 27 neighboring bins.
+
+\section{Algorithm}
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Bin size}: $n_\mathrm{bin} = \max\bigl(1,\,\min(128,\,\lfloor\texttt{boxlen}/r_\mathrm{max}\rfloor)\bigr)$, where $r_\mathrm{max} = \max(dx_\mathrm{min}\,l_\mathrm{scale}/a,\; r_\mathrm{AGN}\times 3.08\times10^{21})/l_\mathrm{scale}$. The upper bound of 128 keeps the bin array ($128^3 \times 4$\,bytes = 8\,MB) within L3 cache.
+  \item \textbf{Linked list construction} ($O(n_\mathrm{AGN})$): For each AGN, compute its bin index and prepend it to that bin's list via \texttt{agn\_next(iAGN) = bin\_head(ibx,iby,ibz)}.
+  \item \textbf{Cell loop} ($O(n_\mathrm{cells} \times n_\mathrm{nearby})$): For each leaf cell, compute its bin and iterate over the $3\times3\times3=27$ neighboring bins, traversing each linked list and applying the existing distance checks.
+\end{enumerate}
+
+Since $r_\mathrm{max} \ll \texttt{bin\_size}$ (typically by a factor of 50), the 27-bin search radius far exceeds $r_\mathrm{max}$, guaranteeing that all AGN within range are found.
+
+\section{Implementation}
+
+Both \texttt{average\_AGN} and \texttt{AGN\_blast} follow the identical pattern:
+
+\begin{codebox}[Bin construction (after rmax computation)]
+\begin{lstlisting}[style=fortran]
+nbin=max(1,min(128,int(boxlen/rmax)))
+bin_size=boxlen/dble(nbin)
+inv_bin_size=dble(nbin)/boxlen
+allocate(bin_head(nbin,nbin,nbin),agn_next(max(1,nAGN)))
+bin_head=0; agn_next=0
+do iAGN=1,nAGN
+   ibx=max(1,min(nbin,int(xAGN(iAGN,1)*inv_bin_size)+1))
+   iby=max(1,min(nbin,int(xAGN(iAGN,2)*inv_bin_size)+1))
+   ibz=max(1,min(nbin,int(xAGN(iAGN,3)*inv_bin_size)+1))
+   agn_next(iAGN)=bin_head(ibx,iby,ibz)
+   bin_head(ibx,iby,ibz)=iAGN
+end do
+\end{lstlisting}
+\end{codebox}
+
+\begin{codebox}[Cell inner loop (replaces \texttt{do iAGN=1,nAGN})]
+\begin{lstlisting}[style=fortran]
+ibx=max(1,min(nbin,int(x*inv_bin_size)+1))
+iby=max(1,min(nbin,int(y*inv_bin_size)+1))
+ibz=max(1,min(nbin,int(z*inv_bin_size)+1))
+do jbz=max(1,ibz-1),min(nbin,ibz+1)
+do jby=max(1,iby-1),min(nbin,iby+1)
+do jbx=max(1,ibx-1),min(nbin,ibx+1)
+   iAGN=bin_head(jbx,jby,jbz)
+   do while(iAGN > 0)
+      ! existing distance check + 3-case handling
+      iAGN=agn_next(iAGN)
+   end do
+end do; end do; end do
+\end{lstlisting}
+\end{codebox}
+
+All three AGN feedback cases (saved energy, jet, thermal) and the OpenMP thread-local accumulation arrays are preserved unchanged. The bin variables \texttt{ibx,iby,ibz,jbx,jby,jbz} are added to the \texttt{!\$omp~parallel~do~private} clause; \texttt{bin\_head} and \texttt{agn\_next} are shared (read-only).
+
+\section{Performance}
+
+Benchmark: output\_00005 (step~241, $a \approx 0.164$, 32K sinks), 4~MPI ranks, OMP\_NUM\_THREADS=1.
+
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Subroutine} & \textbf{Before (s)} & \textbf{After (s)} & \textbf{Speedup} \\
+\midrule
+\texttt{average\_AGN} & 177.2 & 5.9 & 30$\times$ \\
+\texttt{AGN\_blast}   &  72.6 & 5.0 & 14.4$\times$ \\
+\midrule
+\textbf{AGN TOTAL}    & 264.6 & 11.0 & 24$\times$ \\
+\textbf{sinks TOTAL}  & 633.8 & 165.1 & 3.8$\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Verification}
+
+econs = 6.51E-04, bit-identical to the pre-optimization result. All three AGN feedback cases (saved energy / jet / thermal) produce identical physics output.
+
+\section{Modified File}
+
+\begin{center}
+\begin{tabular}{lp{8cm}}
+\toprule
+\textbf{File} & \textbf{Changes} \\
+\midrule
+\texttt{sink\_particle.kjhan.f90} & \texttt{average\_AGN}: spatial binning of AGN inner loop \\
+                                   & \texttt{AGN\_blast}: spatial binning of AGN inner loop \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+
+%======================================================
 \chapter{Scaling Performance}
 \label{ch:scaling}
 %======================================================
@@ -1465,12 +1721,19 @@ cuRAMSES supports GPU acceleration for the main hydro solver routines via CUDA. 
 
 \section{Architecture Overview}
 
-The GPU acceleration is enabled at build time with \texttt{make HDF5=1 USE\_CUDA=1}.  At runtime, each MPI rank initializes a pool of 8 CUDA streams, distributed across available GPUs by local rank (\texttt{local\_rank \% device\_count}).  The multi-architecture binary supports sm\_80 (A100), sm\_86 (A10), sm\_89 (RTX 5000 Ada), and sm\_90 (H100) targets simultaneously.
+The GPU acceleration is enabled at build time with \texttt{make HDF5=1 USE\_CUDA=1}.  At runtime, each MPI rank initializes a CUDA stream pool, distributed across available GPUs by local rank (\texttt{local\_rank \% device\_count}).  The multi-architecture binary supports sm\_80 (A100), sm\_86 (A10), sm\_89 (RTX 5000 Ada), and sm\_90 (H100) targets simultaneously.
+
+The GPU pipeline has evolved through three phases:
+\begin{enumerate}[nosep]
+\item \textbf{Data Upload}: CPU gathers stencil data $\to$ H2D transfer $\to$ GPU compute $\to$ D2H transfer.  H2D dominated at 50--68\% of GPU time.
+\item \textbf{Scatter-Reduce}: GPU-side flux reduction eliminates 98\,MB D2H per flush, reducing D2H to 3\%.  H2D remains bottleneck.
+\item \textbf{GPU-Gather} (current): Mesh arrays uploaded once to GPU ($\sim$4--9\,GB).  Only lightweight stencil \emph{indices} ($\sim$7\,MB) sent per flush.  GPU gathers data from mesh.  \textbf{H2D reduced to 3\%}.
+\end{enumerate}
 
 \begin{infobox}[Key Files]
 \begin{itemize}[nosep,leftmargin=1.5em]
-\item \texttt{cuda\_stream\_pool.\{h,cu\}} --- Thread-safe stream pool with atomic acquire/release
-\item \texttt{hydro\_cuda\_kernels.cu} --- CUDA kernels: \texttt{ctoprim}, \texttt{uslope}, \texttt{trace3d}, \texttt{flux}, \texttt{difmag}, \texttt{synchro}, \texttt{cmpdt}, \texttt{gradient\_phi}, \texttt{upload\_fine}
+\item \texttt{cuda\_stream\_pool.\{h,cu\}} --- Thread-safe stream pool, GPU mesh management, buffer allocation
+\item \texttt{hydro\_cuda\_kernels.cu} --- CUDA kernels: \texttt{gather}, \texttt{gather\_ok}, \texttt{ctoprim}, \texttt{uslope}, \texttt{trace3d}, \texttt{flux}, \texttt{difmag}, \texttt{scatter\_reduce}
 \item \texttt{hydro\_cuda\_interface.f90} --- Fortran ISO\_C\_BINDING wrappers with assumed-size \texttt{buf(*)} for safe \texttt{c\_loc} usage
 \item \texttt{cuda\_commons.f90} --- Fortran module exposing stream pool to the AMR code
 \end{itemize}
@@ -1503,7 +1766,7 @@ The \texttt{schedule(dynamic)} clause ensures load balancing: if one thread is w
 
 GPU kernel launches have significant latency ($\sim$10--50\,$\mu$s).  To amortize this, each GPU thread accumulates grid data into a \textbf{superbatch buffer} of size \texttt{SUPER\_SIZE} (typically 4096 grids) before launching a single kernel covering all accumulated grids.  The buffer is flushed when it approaches capacity or when the \texttt{omp do} loop completes.
 
-For the Godunov solver, the superbatch contains the full stencil data (conservative variables and gravitational acceleration on a $6 \times 6 \times 6$ grid per AMR oct), and the GPU pipeline executes 5 kernels in sequence: \texttt{ctoprim} $\to$ \texttt{uslope} $\to$ \texttt{trace3d} $\to$ \texttt{flux} $\to$ \texttt{difmag}.
+With the GPU-gather path, the superbatch stores \textbf{stencil indices} rather than data: each of the $6^3 = 216$ stencil positions per grid stores a cell index into the GPU-resident mesh.  Interpolated (coarse) cells are pre-computed on CPU and stored in a separate \texttt{interp\_vals} buffer, referenced by negative indices.  On flush, the GPU pipeline executes 8 kernels: \texttt{gather} $\to$ \texttt{gather\_ok} $\to$ \texttt{ctoprim} $\to$ \texttt{uslope} $\to$ \texttt{trace3d} $\to$ \texttt{flux} $\to$ \texttt{difmag} $\to$ \texttt{scatter\_reduce}.
 
 \subsection{Accelerated Routines}
 
@@ -1526,13 +1789,13 @@ Six routines use the hybrid dispatch pattern:
 
 \subsection{Memory Management}
 
-Each stream slot has persistent device memory that is lazily allocated and grown with $2\times$ over-allocation:
+GPU memory is organized in two tiers:
 \begin{itemize}[nosep]
-\item \textbf{Hydro buffers}: \texttt{d\_uloc}, \texttt{d\_gloc}, \texttt{d\_flux}, \texttt{d\_tmp}, \texttt{d\_ok} --- sized for \texttt{SUPER\_SIZE} grids
-\item \textbf{Generic buffers}: Per-stream device memory for lightweight kernels (\texttt{synchro}, \texttt{cmpdt}, etc.)
+\item \textbf{Mesh arrays} (persistent, per-rank): \texttt{d\_mesh\_uold}, \texttt{d\_mesh\_f}, \texttt{d\_mesh\_son} --- uploaded once per \texttt{godunov\_fine} call.  Size: $\texttt{ncell} \times (\texttt{nvar} + \texttt{ndim}) \times 8 + \texttt{ncell} \times 4$ bytes (e.g., 8.6\,GB for 80M cells).
+\item \textbf{Per-stream buffers} (lazily allocated, $2\times$ over-allocation): stencil indices, compute intermediates (\texttt{d\_uloc}, \texttt{d\_gloc}, \texttt{d\_q}, etc.), and scatter-reduce output.
 \end{itemize}
 
-The host-side superbatch buffers (\texttt{gpu\_state\_t}) are allocated lazily per stream slot via the \texttt{hydro\_hybrid\_commons} module, with pinned host memory (\texttt{cudaHostRegister}) for faster DMA transfers.
+The host-side \texttt{gpu\_state\_t} stores stencil index arrays and interpolated values, pinned via \texttt{cudaHostRegister} for fast DMA.  The mesh upload includes a free-memory check: if GPU memory is insufficient, the upload is skipped and all threads fall back to the CPU path automatically.
 
 \subsection{Per-Thread Scatter Buffer (Lock-Free Level L-1)}
 
@@ -1583,62 +1846,758 @@ The Godunov GPU pipeline includes an on-device \textbf{scatter-reduce} kernel th
 
 The D2H transfer is reduced to $\sim$5\,MB per flush (vs.\ 98\,MB for the raw flux array), a $20\times$ reduction in PCIe bandwidth usage.  The host applies Level~$L$ results directly to \texttt{unew} (conflict-free) and appends Level~$L{-}1$ results to the per-thread scatter buffer for deferred merge.
 
+\section{GPU-Gather: Mesh-Resident Data}
+\label{sec:gpu-gather}
+
+With the scatter-reduce kernel in place, the D2H bottleneck was resolved (3\% of GPU time).  However, the H2D transfer of stencil data (\texttt{uloc}, \texttt{gloc}, \texttt{ok}) remained the dominant cost at 50--68\% of GPU time, because each flush copied $\sim$100\,MB of gathered cell data from host to device.
+
+The \textbf{GPU-gather} optimization eliminates this bottleneck by keeping the mesh arrays (\texttt{uold}, \texttt{f}, \texttt{son}) persistently on the GPU and sending only lightweight stencil \emph{indices} per flush.
+
+\subsection{Mesh Upload}
+
+At the start of each \texttt{godunov\_fine} call, the three mesh arrays are uploaded to GPU device memory:
+\[
+\texttt{d\_mesh\_uold}(\texttt{ncell} \times \texttt{nvar}), \quad
+\texttt{d\_mesh\_f}(\texttt{ncell} \times \texttt{ndim}), \quad
+\texttt{d\_mesh\_son}(\texttt{ncell})
+\]
+where $\texttt{ncell} = \texttt{ncoarse} + 8 \times \texttt{ngridmax}$ is the total cell capacity.  For a typical 4-rank run with $\texttt{ngridmax} = 10\text{M}$ per rank, the mesh occupies $\sim$8.6\,GB per GPU.
+
+\begin{infobox}[Important: 1 MPI rank per GPU]
+Each MPI rank uploads its own mesh to GPU memory.  Multiple ranks sharing a GPU will exceed GPU memory (e.g., $4 \times 8.6\text{ GB} = 34.4\text{ GB} > 32\text{ GB}$).  The code detects insufficient GPU memory via \texttt{cudaMemGetInfo} and automatically falls back to the CPU path.
+\end{infobox}
+
+\subsection{Stencil Index Encoding}
+
+Instead of copying cell data on the CPU, the stencil batch routine stores cell \emph{indices} for each of the $6^3 = 216$ stencil positions per grid:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Index value} & \textbf{Meaning} \\
+\midrule
+$> 0$ (positive) & Direct cell index into \texttt{mesh\_uold} (1-based Fortran index) \\
+$< 0$ (negative) & $-\text{slot}$ into \texttt{interp\_vals} buffer (interpolated coarse cell) \\
+$= 0$            & Boundary/empty cell (data set to zero) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+For existing fine grids, the cell index is simply $\texttt{ncoarse} + (\texttt{ind\_son}-1) \times \texttt{ngridmax} + \texttt{igrid\_nbor}$.  For coarse cells without a fine grid, \texttt{interpol\_hydro} is called on the CPU and the result is stored in the \texttt{interp\_vals} buffer using AoS layout (\texttt{nvar} doubles per slot).
+
+\subsection{GPU Gather Kernels}
+
+Two new kernels precede the existing compute pipeline:
+
+\begin{enumerate}[nosep]
+\item \textbf{\texttt{hydro\_gather\_kernel}}: Each thread reads its stencil index, fetches the corresponding cell data from \texttt{d\_mesh\_uold} (or \texttt{d\_interp\_vals} for negative indices), and writes to \texttt{d\_uloc}/\texttt{d\_gloc}.  Gravity data is fetched from \texttt{d\_mesh\_f} using the gravity stencil index.
+
+\item \textbf{\texttt{hydro\_gather\_ok\_kernel}}: Each thread reads the stencil index and checks $\texttt{son}(\text{cell}) > 0$ from \texttt{d\_mesh\_son} to determine the refinement flag \texttt{ok}.
+\end{enumerate}
+
+Both kernels use the same block layout as the compute kernels: one CUDA block per grid, 216 threads per block ($= 6^3$ stencil cells).
+
+\subsection{H2D Transfer Reduction}
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Transfer} & \textbf{Data Upload (old)} & \textbf{GPU-Gather (new)} \\
+\midrule
+Per-flush H2D & $\sim$100\,MB (uloc+gloc+ok) & $\sim$7\,MB (stencil indices) \\
+Mesh upload   & --- & $\sim$4--9\,GB (once per godunov call) \\
+D2H           & $\sim$5\,MB & $\sim$5\,MB (unchanged) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The per-flush H2D transfer is reduced by $14\times$.  The one-time mesh upload is amortized across $\sim$50--300 flushes per \texttt{godunov\_fine} call.
+
 \section{Verification and Performance}
 
 The GPU-accelerated code produces bit-identical physics results compared to the CPU-only build across all tested configurations.  All tests use 10 coarse steps of a $256^3$ cosmological simulation with \texttt{levelmax=10}.
 
 \subsection{Physics Verification}
 
+All configurations produce bit-identical physics at step~10:
+
 \begin{center}
 \begin{tabular}{llccc}
 \toprule
 \textbf{Configuration} & \textbf{GPU} & $e_{\rm cons}$ & $e_{\rm pot}$ & $e_{\rm kin}$ \\
 \midrule
-CPU-only (4r$\times$2t)            & ---               & $5.23 \times 10^{-3}$ & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ \\
-Hybrid 8-stream (4r$\times$2t)     & RTX 5000 Ada      & $5.23 \times 10^{-3}$ & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ \\
-Hybrid 1-stream (4r$\times$2t)     & RTX 5000 Ada      & $5.23 \times 10^{-3}$ & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ \\
-Hybrid 8-stream (4r$\times$2t)     & A10               & $5.23 \times 10^{-3}$ & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ \\
+CPU-only (4r$\times$4t)              & ---          & $5.23 \times 10^{-3}$ & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ \\
+Scatter-reduce (4r$\times$4t, 1 GPU) & A10          & $5.23 \times 10^{-3}$ & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ \\
+Scatter-reduce (4r$\times$4t, 4 GPU) & A10          & $5.23 \times 10^{-3}$ & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ \\
+GPU-gather (4r$\times$4t, 4 GPU)     & A10          & $5.23 \times 10^{-3}$ & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ \\
+GPU-gather (1r$\times$8t, 1 GPU)     & RTX 5000 Ada & $5.22 \times 10^{-3}$ & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\subsection{Performance (RTX 5000 Ada, 8 cores)}
+The 1-rank test shows slightly different $e_{\rm cons}$ due to different domain decomposition (all grids on a single rank vs.\ distributed across 4 ranks), but the difference is at roundoff level.
+
+\subsection{Performance Comparison (A10, 4 ranks $\times$ 4 threads)}
 
 \begin{center}
-\begin{tabular}{lrrrr}
+\begin{tabular}{lrrr}
 \toprule
-\textbf{Configuration} & \textbf{Godunov (s)} & \textbf{Total (s)} & \textbf{GPU flushes} & \textbf{CPU batches} \\
+\textbf{Configuration} & \textbf{Godunov (s)} & \textbf{Total (s)} & \textbf{Speedup} \\
 \midrule
-CPU-only (4r$\times$2t)            & 22.0 & 90.1  & ---  & ---    \\
-Hybrid 8-stream (4r$\times$2t)     & 18.4 & 89.4  & 648  & 0      \\
-Hybrid 1-stream (4r$\times$2t)     & 19.0 & 88.0  & 358  & 36\,848 \\
+CPU-only (no GPU)                  &  9.7 &  79.1 & 1.00$\times$ \\
+Scatter-reduce (1 GPU, shared)     & 44.7 & 121.3 & 0.65$\times$ \\
+Scatter-reduce (4 GPU, 1/rank)     & 46.5 & 134.0 & 0.59$\times$ \\
+\textbf{GPU-gather (4 GPU, 1/rank)} & \textbf{24.8} & \textbf{64.6} & \textbf{1.22$\times$} \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-With 8 streams and 2 OMP threads per rank, all threads acquire GPU streams (0 CPU batches), achieving a \textbf{16\% speedup} on the Godunov solver (22.0\,s $\to$ 18.4\,s).  With 1 stream per rank, the hybrid mode activates: 1 GPU thread and 1 CPU thread process work concurrently (358 GPU flushes + 36\,848 CPU batches), still producing identical physics.
+The GPU-gather path achieves a \textbf{22\% speedup} over CPU-only, reversing the 35--41\% \emph{slowdown} of the previous scatter-reduce approach.  The Godunov solver itself is still 2.6$\times$ slower than CPU-only (24.8\,s vs.\ 9.7\,s) because the mesh upload overhead dominates the GPU thread, but the overall run benefits from the hybrid CPU/GPU work distribution.
 
-\subsection{GPU Kernel Breakdown (8-stream, RTX 5000 Ada)}
+\subsection{GPU Kernel Breakdown (GPU-gather, A10, step~10)}
 
 \begin{center}
-\begin{tabular}{lrr}
+\begin{tabular}{lrrlrr}
 \toprule
-\textbf{Phase} & \textbf{Time (s)} & \textbf{\%} \\
+& \multicolumn{2}{c}{\textbf{Scatter-reduce (old)}} & & \multicolumn{2}{c}{\textbf{GPU-gather (new)}} \\
+\cmidrule{2-3} \cmidrule{5-6}
+\textbf{Phase} & \textbf{Time} & \textbf{\%} & & \textbf{Time} & \textbf{\%} \\
 \midrule
-H2D transfer        & 5.07  & 50.2 \\
-ctoprim             & 1.10  & 10.9 \\
-uslope              & 1.19  & 11.8 \\
-trace3d             & 1.23  & 12.1 \\
-flux+memset         & 0.70  &  6.9 \\
-difmag              & 0.43  &  4.2 \\
-D2H transfer        & 0.38  &  3.8 \\
+H2D transfer   & 5.07\,s & 50.2 & & 0.10\,s &  3.0 \\
+ctoprim        & 1.10\,s & 10.9 & & 1.10\,s & 32.9 \\
+uslope         & 1.19\,s & 11.8 & & 0.64\,s & 19.3 \\
+trace3d        & 1.23\,s & 12.1 & & 0.41\,s & 12.1 \\
+flux+memset    & 0.70\,s &  6.9 & & 0.83\,s & 24.8 \\
+difmag         & 0.43\,s &  4.2 & & 0.15\,s &  4.6 \\
+D2H transfer   & 0.38\,s &  3.8 & & 0.11\,s &  3.3 \\
 \midrule
-Total               & 10.09 & 100.0 \\
+Total          & 10.09\,s & 100  & & 3.33\,s & 100 \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-H2D transfer dominates at 50\% of GPU time, indicating that further optimization via GPU-side gather (uploading mesh arrays once and using stencil indices instead of full $6^3$ stencils) would yield significant additional speedup.
+H2D transfer is reduced from 50\% to 3\% of GPU time.  The GPU compute kernels now dominate, indicating that the PCIe transfer bottleneck has been eliminated.  Total GPU kernel time is reduced $3\times$ (10.1\,s $\to$ 3.3\,s).
+
+
+%======================================================
+\chapter{FFTW3 CPU Direct Poisson Solver}
+\label{ch:fftw3}
+%======================================================
+
+For fully uniform AMR levels (where all $N = N_x \times N_y \times N_z$ cells exist), the Poisson equation can be solved exactly via 3D FFT instead of iterative multigrid V-cycles.  The FFTW3 solver provides an \textbf{8.3$\times$ speedup} over multigrid (241\,s $\to$ 28.9\,s for $512^3$) using CPU-only computation, matching the GPU cuFFT result without requiring a GPU.
+
+\section{Build and Configuration}
+
+\begin{verbatim}
+# Build with FFTW3 support
+cd bin && make HDF5=1 USE_FFTW=1
+
+# Namelist: &RUN_PARAMS
+use_fftw = .true.
+\end{verbatim}
+
+Requires FFTW3 with MPI and OpenMP support (\texttt{-lfftw3\_mpi -lfftw3\_omp -lfftw3}).
+
+\section{Two-Path Architecture}
+
+The solver automatically selects the appropriate path based on grid size:
+
+\subsection{Small Grid Path ($N \le 256^3$)}
+
+\begin{enumerate}[nosep]
+  \item Each rank gathers local RHS into a local array.
+  \item \texttt{MPI\_ALLREDUCE} sums contributions from all ranks.
+  \item Local in-place R2C FFT via FFTW3+OpenMP.
+  \item Apply Green's function: $G(\mathbf{k}) = \Delta x^2 / L_k$ where $L_k = 2\cos k_x + 2\cos k_y + 2\cos k_z - 6$.
+  \item Inverse C2R FFT; scatter $\phi$ back to RAMSES cells.
+\end{enumerate}
+
+\subsection{Large Grid Path ($N > 256^3$): Sparse P2P + FFTW MPI Slab}
+
+For large grids, the \texttt{ALLREDUCE} approach would require ${\sim}1$\,GB+ of data per rank.  Instead, FFTW's MPI slab decomposition distributes the FFT across ranks, with each rank owning $\lceil N_x / N_{\text{cpu}} \rceil$ contiguous $x$-slabs.
+
+Data redistribution between RAMSES's spatial domain decomposition and FFTW's slab layout uses \textbf{sparse point-to-point} communication:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Partner precomputation} (cached, recomputed on load rebalance):
+  \begin{itemize}[nosep]
+    \item \textit{Send partners}: FFTW slab ranks whose position range overlaps my RAMSES domain.
+    \item \textit{Recv partners}: RAMSES ranks whose domain overlaps my FFTW slab.
+    \item Symmetric overlap test from \texttt{bisec\_cpubox\_min/max}:
+    \[
+      \text{overlap}(A, B) = x_{\max}^{(A)} > \frac{s_{\min}^{(B)} - 0.5}{N_x} \;\wedge\; x_{\min}^{(A)} < \frac{s_{\max}^{(B)} + 1.5}{N_x}
+    \]
+    \item Periodic boundary wrapping handled when $s_{\min} < 0$ or $s_{\max} \ge N_x$.
+  \end{itemize}
+  \item \textbf{Count exchange}: \texttt{MPI\_ISEND/IRECV} of sendcounts to partners only (tag 701).
+  \item \textbf{Pack} send buffer with (slab\_idx, rhs) pairs per destination rank.
+  \item \textbf{Forward data exchange}: \texttt{MPI\_ISEND/IRECV} to partners with non-zero counts (tag 702).
+  \item \textbf{Unpack} into FFTW real data array; execute forward R2C FFT.
+  \item \textbf{Apply Green's function}; inverse C2R FFT; normalise.
+  \item \textbf{Reverse data exchange}: phi sent back via same partners, reversed direction (tag 703).
+  \item \textbf{Scatter} $\phi$ to RAMSES cells using same grid iteration order.
+\end{enumerate}
+
+\subsection{Partner List Caching}
+
+Partner lists are stored in \texttt{save} variables and invalidated when:
+\begin{itemize}[nosep]
+  \item \texttt{bisec\_cpubox\_min/max(myid, 1)} changes (load rebalancing), or
+  \item \texttt{fftw\_block} changes (grid size change).
+\end{itemize}
+
+\section{Verification}
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Configuration} & $e_{\text{cons}}$ & \textbf{Base Poisson (s)} \\
+\midrule
+MG V-cycle (CPU)    & $6.51 \times 10^{-4}$ & 241 \\
+cuFFT (GPU, A40)    & $6.11 \times 10^{-4}$ & 28 \\
+FFTW3 sparse P2P    & $6.12 \times 10^{-4}$ & 28.9 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+On 12 MPI ranks with $512^3$ base grid: $n_{\text{send}} = 5$, $n_{\text{recv}} = 8$ partners (vs.\ 12 total ranks).
+
+\section{Modified Files}
+
+\begin{itemize}[nosep]
+  \item \texttt{patch/cuda/multigrid\_fine\_commons.f90} --- FFTW3 solver + sparse P2P exchange
+  \item \texttt{patch/Horizon5-master-2/amr\_parameters.f90} --- \texttt{use\_fftw} parameter
+  \item \texttt{patch/Horizon5-master-2/read\_params.f90} --- Read \texttt{use\_fftw} from namelist
+  \item \texttt{bin/Makefile} --- \texttt{USE\_FFTW} compile flag and library linking
+\end{itemize}
+
+
+%======================================================
+\chapter{CPL Dark Energy}
+\label{ch:cpl}
+%======================================================
+
+cuRAMSES supports the CPL (Chevallier--Polarski--Linder) parametrization of dark energy \cite{Chevallier2001,Linder2003}, generalizing the cosmological constant $\Lambda$ to a time-varying equation of state:
+\begin{equation}\label{eq:cpl_w}
+  w(a) = w_0 + w_a\,(1 - a),
+\end{equation}
+where $a$ is the scale factor, $w_0$ is the present-day value, and $w_a$ governs the time variation.  The standard $\Lambda$CDM model corresponds to $w_0 = -1$, $w_a = 0$.
+
+\section{Background Cosmology}
+
+The dark energy density evolves as
+\begin{equation}\label{eq:f_de}
+  \frac{\rho_{\mathrm{de}}(a)}{\rho_{\mathrm{de},0}}
+  \equiv f_{\mathrm{de}}(a)
+  = a^{-3(1+w_0+w_a)}\;\exp\!\bigl[-3\,w_a\,(1-a)\bigr].
+\end{equation}
+For $\Lambda$CDM ($w_0=-1$, $w_a=0$), $f_{\mathrm{de}}(a) = 1$ identically, recovering the constant dark energy density.
+
+The Friedmann equation becomes
+\begin{equation}\label{eq:friedmann_cpl}
+  \frac{H^2(a)}{H_0^2}
+  = \frac{\Omega_m}{a^3} + \frac{\Omega_k}{a^2}
+    + \Omega_{\mathrm{de}}\;f_{\mathrm{de}}(a),
+\end{equation}
+where $\Omega_k = 1 - \Omega_m - \Omega_{\mathrm{de}}$.
+
+\section{Modified Functions}
+
+The following functions in \texttt{init\_time.f90} are modified:
+
+\begin{itemize}[nosep]
+  \item \textbf{\texttt{f\_de(a, w0\_in, wa\_in)}}: New standalone function implementing Eq.~\eqref{eq:f_de}.  Uses exact $f_{\mathrm{de}}=1$ branch for $\Lambda$CDM to guarantee bit-identical results.
+
+  \item \textbf{\texttt{dadtau(axp\_tau, ..., w0\_in, wa\_in)}}: Conformal time derivative $da/d\tau$.  The dark energy term $\Omega_{\mathrm{de}}\,a^6$ is replaced by $\Omega_{\mathrm{de}}\,a^6\,f_{\mathrm{de}}(a)$:
+  \begin{equation}
+    \left(\frac{da}{d\tau}\right)^2 = a^3\!\left[\Omega_m + \Omega_{\mathrm{de}}\,a^3\,f_{\mathrm{de}}(a) + \Omega_k\,a\right].
+  \end{equation}
+
+  \item \textbf{\texttt{dadt(axp\_t, ..., w0\_in, wa\_in)}}: Proper time derivative $da/dt$, with the same CPL modification.
+
+  \item \textbf{\texttt{friedman(..., w0\_in, wa\_in)}}: Friedmann integrator that builds the look-up tables $a(\tau)$, $H(\tau)$, $t(\tau)$.  The extra $w_0$, $w_a$ parameters are passed through to \texttt{dadtau}/\texttt{dadt}.
+\end{itemize}
+
+\section{Linear Growth Factor}
+
+The linear growing mode $D_1(a)$ and the growth rate $f = d\ln D_1/d\ln a$ (Peebles~\cite{Peebles1980}) are generalized using
+\begin{equation}\label{eq:y_cpl}
+  y(a) \equiv (aH/H_0)^2 = \frac{\Omega_m}{a} + \Omega_k + \Omega_{\mathrm{de}}\,f_{\mathrm{de}}(a)\,a^2.
+\end{equation}
+The growth factor is computed via Romberg integration:
+\[
+  D_1(a) = \frac{\sqrt{y(a)}}{a}\int_0^a \frac{da'}{y(a')^{3/2}},
+\]
+and the growth rate requires the logarithmic derivative:
+\begin{equation}\label{eq:dyda}
+  \frac{dy}{d\ln a} = -\frac{\Omega_m}{a}
+    + \Omega_{\mathrm{de}}\,a^2\,f_{\mathrm{de}}(a)\,\bigl[-1 - 3\,w(a)\bigr],
+\end{equation}
+so that
+\[
+  f(a) = \frac{1}{2}\frac{dy/d\!\ln a}{y} - 1
+    + \frac{a}{y^{3/2}\!\int_0^a da'/y^{3/2}}.
+\]
+These are implemented in the \texttt{contains} functions of \texttt{init\_cosmo}: \texttt{fy(a)}, \texttt{d1a(a)}, and \texttt{fpeebl(a)}.
+
+\paragraph{$\Lambda$CDM verification.}
+For $w_0=-1$, $w_a=0$: $f_{\mathrm{de}}=1$, $w(a)=-1$, and $-1-3w=-1-3(-1)=2$, giving
+\[
+  \frac{dy}{d\ln a}\Big|_{\Lambda\mathrm{CDM}} = -\frac{\Omega_m}{a} + 2\,\Omega_\Lambda\,a^2,
+\]
+which recovers the original RAMSES expression $(\Omega_\Lambda a^2 - \tfrac{1}{2}\Omega_m/a)/y$.
+
+\section{Hubble Rate in Cooling Module}
+
+The function \texttt{HsurH0(z)} in \texttt{cooling\_module.f90} is modified to include $f_{\mathrm{de}}$:
+\begin{equation}
+  H(z)/H_0 = \sqrt{\Omega_m\,(1+z)^3 + \Omega_R\,(1+z)^2 + \Omega_{\mathrm{de}}\,f_{\mathrm{de}}(a)},
+  \qquad a = \frac{1}{1+z}.
+\end{equation}
+This ensures that cooling rates computed from the UV background evolve consistently with the CPL cosmology.
+
+\section{Dark Energy Perturbation}
+\label{sec:de_perturb}
+
+When \texttt{de\_perturb=.true.}, cuRAMSES includes dark energy density
+perturbations in the Poisson equation.  Two methods are available:
+
+\subsection{Table-Based Linear Response}
+
+Analogous to the neutrino linear response (Chapter~\ref{ch:neutrino}),
+a CAMB transfer function table provides an effective $R_{\mathrm{DE}}(k,a)$.
+The table is generated using the \textbf{Weyl potential method}: two CAMB
+runs (target $c_s^2$ and reference $c_s^2=1$) yield the gauge-invariant
+Weyl potential ratio, from which an effective $R_{\mathrm{DE}}$ in the
+Newtonian gauge is extracted (see equation below).  This avoids the
+synchronous-gauge $\delta_{\mathrm{DE}}$ which can overestimate the
+correction by a factor of ${\sim}26$ for $c_s^2=0$.
+The FFT solver applies the correction:
+\begin{equation}\label{eq:de_factor_table}
+  \hat\phi(\mathbf{k}) \;\leftarrow\; \hat\phi(\mathbf{k}) \times
+  \left[1 + \frac{\rho_{\mathrm{de}}(a)}{\rho_{\mathrm{cb}}}\,
+  R_{\mathrm{DE}}(k,a)\right],
+\end{equation}
+where $\rho_{\mathrm{de}}(a)/\rho_{\mathrm{cb}} = (\Omega_{\mathrm{de}}\,
+f_{\mathrm{de}}(a)\,a^3) / \Omega_{\mathrm{cb}}$ and $\Omega_{\mathrm{cb}}
+= \Omega_m - \Omega_\nu$ (or $\Omega_m$ without neutrinos).
+
+This method works for \emph{any} sound speed, including $c_s^2 = 0$ (clustering
+dark energy).  For $c_s^2 = 0$, $R_{\mathrm{DE}}$ is independent of $k$, so
+the MG solver on AMR fine levels also applies a uniform boost to \texttt{fourpi}:
+\begin{equation}
+  f_{4\pi} \;\leftarrow\; f_{4\pi} \times
+  \left[1 + \frac{\rho_{\mathrm{de}}(a)}{\rho_{\mathrm{cb}}}\,
+  R_{\mathrm{DE}}(k_{\min},a)\right].
+\end{equation}
+This ensures that small-scale gravitational forces from clustering DE are
+captured at all AMR levels.  For $c_s^2 \geq 10^{-4}$, DE perturbations
+are suppressed at small scales (Jeans filtering), and the MG boost is omitted.
+
+The table is generated by:
+\begin{codebox}[Generate DE table]
+\begin{lstlisting}[style=fortran,numbers=none]
+pip install camb
+python3 misc/generate_de_table.py --w0=-0.9 --wa=0.1 --cs2=0.0 \
+    -o de_table.dat
+\end{lstlisting}
+\end{codebox}
+
+\subsection{Quasi-Static Method (Fallback)}
+
+When no \texttt{de\_table} is provided and $c_s^2 > 0$, the code uses the
+quasi-static approximation~\cite{Bean2004}.  The FFT solver applies:
+\begin{equation}\label{eq:de_factor_qs}
+  \hat\phi(\mathbf{k}) \;\leftarrow\; \hat\phi(\mathbf{k}) \times
+  \frac{k^2 + \kappa^2}{k^2 + \kappa^2 + \alpha},
+\end{equation}
+where $\kappa^2 = (aH/c)^2/c_s^2$ and $\alpha = \frac{3}{2}(H_0/c)^2
+\Omega_{\mathrm{de}}\,f_{\mathrm{de}}(a)\,(1+w)/c_s^2$.  This method
+requires $c_s^2 > 0$; it is undefined for $c_s^2 = 0$.
+
+\section{Namelist Configuration}
+
+CPL parameters are specified in the \texttt{\&CPL\_PARAMS} namelist block,
+with the activation flag \texttt{de\_perturb} in \texttt{\&RUN\_PARAMS}:
+\begin{codebox}[CPL dark energy example]
+\begin{lstlisting}[style=fortran,numbers=none]
+&CPL_PARAMS
+w0    = -0.9
+wa    =  0.1
+/
+\end{lstlisting}
+\end{codebox}
+When this block is absent (or when $w_0 = -1$, $w_a = 0$), the code produces results that are bit-identical to the original $\Lambda$CDM implementation.
+
+To enable DE perturbations with the table-based method ($c_s^2 = 0$):
+\begin{codebox}[DE perturbation with CAMB table]
+\begin{lstlisting}[style=fortran,numbers=none]
+&RUN_PARAMS
+de_perturb = .true.
+/
+
+&CPL_PARAMS
+w0         = -0.9
+wa         =  0.1
+cs2_de     =  0.0
+de_table   = 'de_table.dat'
+/
+\end{lstlisting}
+\end{codebox}
+
+\section{Modified Files}
+
+\begin{longtable}{L{6.5cm} L{7cm}}
+\toprule
+\textbf{File} & \textbf{Changes} \\
+\midrule
+\endhead
+\texttt{amr\_parameters.jaehyun.f90} & Declare \texttt{w0}, \texttt{wa}, \texttt{cs2\_de}, \texttt{de\_table} \\
+\texttt{read\_params.jaehyun.f90} & Define and read \texttt{\&CPL\_PARAMS} namelist; 3-way DE validation \\
+\texttt{init\_time.f90} & Add \texttt{f\_de}; modify \texttt{dadtau}, \texttt{dadt}, \texttt{friedman}, \texttt{fy}, \texttt{d1a}, \texttt{fpeebl}, \texttt{vfact} \\
+\texttt{cooling\_module.f90} & Modify \texttt{HsurH0} to use \texttt{f\_de} \\
+\texttt{dark\_energy\_commons.f90} & Table I/O (\texttt{read\_de\_table}, \texttt{get\_de\_ratio}), quasi-static params \\
+\texttt{multigrid\_fine\_commons.f90} & FFT: table/quasi-static DE correction; MG: \texttt{fourpi} boost for $c_s^2 \approx 0$ \\
+\texttt{generate\_de\_table.py} & New script: CAMB DE transfer function table generation \\
+\bottomrule
+\end{longtable}
+
+
+%======================================================
+\chapter{Massive Neutrino Linear Response}
+\label{ch:neutrino}
+%======================================================
+
+cuRAMSES implements the effect of massive neutrinos on structure formation
+via the \emph{linear response} method, following the approach used in
+modern cosmological $N$-body codes~\cite{AliHaimoud2013,Bird2018}.
+Instead of tracking neutrino particles (which require very large shot
+noise), the neutrino density perturbation is computed from a precomputed
+CAMB transfer function table and added to the Poisson source term in
+Fourier space.
+
+\section{Physical Background}
+
+In a cosmology with massive neutrinos, the total matter density splits
+into a CDM+baryon component (``cb'') and a neutrino component:
+\begin{equation}
+  \Omega_m = \Omega_{\mathrm{cb}} + \Omega_\nu,
+  \qquad
+  \Omega_\nu = \frac{\Sigma m_\nu}{93.14\,h^2\;\text{eV}}.
+\end{equation}
+At the linear level, the neutrino density perturbation $\delta_\nu$
+relates to the CDM+baryon perturbation $\delta_{\mathrm{cb}}$ via the
+transfer function ratio:
+\begin{equation}\label{eq:Rnu}
+  R_\nu(k,a) = \frac{T_\nu(k,a)}{T_{\mathrm{cb}}(k,a)},
+  \qquad
+  \delta_\nu(k,a) = R_\nu(k,a)\;\delta_{\mathrm{cb}}(k,a).
+\end{equation}
+This ratio encodes neutrino free-streaming: at scales below the neutrino
+free-streaming length ($k > k_{\mathrm{fs}}$), $R_\nu \to 0$ because
+neutrinos cannot cluster.  At large scales ($k \ll k_{\mathrm{fs}}$),
+$R_\nu \to 1$ because neutrinos cluster like CDM.
+
+\section{Poisson Equation Modification}
+
+The Poisson equation in the presence of massive neutrinos is
+\begin{equation}\label{eq:poisson_nu}
+  \nabla^2\phi = \frac{3}{2}\,a\,H_0^2
+    \bigl(\Omega_{\mathrm{cb}}\,\delta_{\mathrm{cb}}
+    + \Omega_\nu\,\delta_\nu\bigr).
+\end{equation}
+Substituting the linear response relation, the FFT-based solver applies
+the modified Green's function:
+\begin{equation}\label{eq:green_nu}
+  \hat\phi(\mathbf{k}) = G(k)\;\hat\delta_{\mathrm{cb}}(\mathbf{k})
+  \;\underbrace{\left[1 + \frac{\Omega_\nu}{\Omega_{\mathrm{cb}}}\,
+    R_\nu(k,a)\right]}_{\text{neutrino factor}},
+\end{equation}
+where $G(k) = -\Delta x^2 / L_k$ is the standard discrete Green's function
+with $L_k = 2\sum_d[1 - \cos(2\pi k_d/N)]$.
+
+For the Multigrid (MG) solver on AMR fine levels, the Poisson source
+coefficient is adjusted to exclude the neutrino contribution from the
+particle-based density:
+\begin{equation}
+  f_{4\pi} = \frac{3}{2}\,(\Omega_m - \Omega_\nu)\,a\;\Delta x,
+\end{equation}
+since the MG fine-level density comes only from CDM+baryon particles,
+and neutrinos are accounted for in the base-level FFT solve.
+
+\section{Transfer Function Table}
+
+The ratio $R_\nu(k,a)$ is precomputed using the \texttt{CAMB} Boltzmann
+solver and stored as an ASCII table.  The table is generated by:
+
+\begin{codebox}[Generate neutrino table]
+\begin{lstlisting}[style=fortran,numbers=none]
+pip install camb
+python3 misc/generate_neutrino_table.py [output_file]
+\end{lstlisting}
+\end{codebox}
+
+\noindent
+The script \texttt{misc/generate\_neutrino\_table.py} accepts command-line
+arguments and produces a table with the following structure:
+
+\begin{itemize}[nosep]
+  \item Header lines (starting with \texttt{\#}): cosmological parameters used
+  \item First data line: \texttt{nk  na} (number of $k$ and $a$ grid points)
+  \item $k$ values in $h/\text{Mpc}$, log-spaced (default: 200 points, $10^{-4}$--$10$)
+  \item $a$ values (scale factor), log-spaced (default: 50 points, $0.01$--$1.0$)
+  \item $R_\nu(k,a)$ matrix: \texttt{nk} rows $\times$ \texttt{na} columns
+\end{itemize}
+
+At runtime, the table is read by \texttt{read\_neutrino\_table()} in
+\texttt{neutrino\_commons.f90}.  The function \texttt{get\_nu\_ratio(k,a)}
+performs bilinear interpolation in $(\log_{10} k, \log_{10} a)$ space,
+clamping to table boundaries.
+
+\section{Implementation Details}
+
+\begin{enumerate}[nosep]
+  \item \textbf{MG fine levels} ($\ell > \ell_{\min}$): The source coefficient
+    \texttt{fourpi} uses $\Omega_{\mathrm{cb}} = \Omega_m - \Omega_\nu$
+    instead of $\Omega_m$.  No $k$-space correction is applied because the
+    AMR cells resolve small-scale structure where neutrino perturbations are
+    negligible ($R_\nu \approx 0$).
+
+  \item \textbf{FFT base level} ($\ell = \ell_{\min}$): After the forward
+    FFT of the density field, each Fourier mode $\hat\delta(\mathbf{k})$
+    is multiplied by the neutrino factor
+    $[1 + (\Omega_\nu/\Omega_{\mathrm{cb}})\,R_\nu(k,a)]$
+    before applying the Green's function.
+
+  \item \textbf{Both FFT paths}: The correction is applied in both the
+    small-grid path ($N \le 256^3$, \texttt{MPI\_ALLREDUCE}) and the
+    large-grid path ($N > 256^3$, FFTW MPI slab decomposition).
+
+  \item \textbf{Wave number conversion}: The physical wave number is
+    $k_{\text{phys}} = 2\pi\sqrt{k_x^2+k_y^2+k_z^2}/L_{\text{box}}$
+    in units of $h/\text{Mpc}$, matching the CAMB table units.
+
+  \item \textbf{Table loading}: The table is read once on the first
+    call to the FFT solver.  All MPI ranks read independently from the
+    shared filesystem.
+\end{enumerate}
+
+\section{Namelist Configuration}
+
+Neutrino parameters are split across two namelist blocks: the activation
+flag \texttt{use\_neutrino} in \texttt{\&RUN\_PARAMS} and the physical
+parameters in the dedicated \texttt{\&NEUTRINO\_PARAMS} block:
+
+\begin{codebox}[Neutrino configuration example ($\Sigma m_\nu=0.06\,$eV)]
+\begin{lstlisting}[style=fortran,numbers=none]
+&RUN_PARAMS
+use_neutrino=.true.
+/
+
+&NEUTRINO_PARAMS
+omega_nu=0.00140
+neutrino_table='neutrino_table.dat'
+/
+\end{lstlisting}
+\end{codebox}
+
+\noindent
+\textbf{Notes:}
+\begin{itemize}[nosep]
+  \item \texttt{omega\_m} retains its standard meaning (CDM + baryon + neutrino).
+    The code internally computes $\Omega_{\mathrm{cb}} = \Omega_m - \Omega_\nu$.
+  \item Setting \texttt{omega\_nu=0} (or omitting \texttt{use\_neutrino})
+    produces results \textbf{bit-identical} to the baseline code.
+  \item The CAMB table cosmology should match the simulation cosmology.
+    A mismatch will not cause a crash but will reduce physical accuracy.
+  \item The linear response approximation is valid as long as
+    $\delta_\nu \ll 1$, which holds for $\Sigma m_\nu \lesssim 0.3\,$eV
+    at all redshifts of interest.
+\end{itemize}
+
+\section{Verification}
+
+With \texttt{omega\_nu=0}, the code produces results identical to the
+reference run without the neutrino module:
+\begin{itemize}[nosep]
+  \item econs $= 6.71 \times 10^{-4}$ at step~242
+    (reference: $6.71 \times 10^{-4}$, bit-identical).
+\end{itemize}
+
+\section{Modified Files}
+
+\begin{longtable}{L{6.5cm} L{7cm}}
+\toprule
+\textbf{File} & \textbf{Changes} \\
+\midrule
+\endhead
+\texttt{neutrino\_commons.f90} & New module: table I/O, bilinear interpolation \\
+\texttt{generate\_neutrino\_table.py} & New script: CAMB transfer function table generation \\
+\texttt{amr\_parameters.jaehyun.f90} & Declare \texttt{omega\_nu}, \texttt{use\_neutrino}, \texttt{neutrino\_table} \\
+\texttt{read\_params.jaehyun.f90} & Read \texttt{\&NEUTRINO\_PARAMS} namelist; validation \\
+\texttt{multigrid\_fine\_commons.f90} & MG: \texttt{fourpi} uses $\Omega_{\mathrm{cb}}$; FFT: neutrino factor \\
+\texttt{Makefile} & Add \texttt{neutrino\_commons.o} to \texttt{MODOBJ} \\
+\bottomrule
+\end{longtable}
+
+
+%======================================================
+\chapter{Self-Interacting Dark Matter}
+\label{ch:sidm}
+%======================================================
+
+cuRAMSES implements self-interacting dark matter (SIDM) via cell-based
+Monte Carlo scattering.  Dark matter particles within the same leaf cell
+are randomly paired, and each pair undergoes scattering
+with probability proportional to the cross-section.
+
+The implementation supports four extensions beyond the basic constant
+isotropic elastic model:
+\begin{enumerate}[nosep]
+  \item Velocity-dependent cross-section (Yukawa, power-law)
+  \item Adaptive timestep constraint ($P < $ \texttt{sidm\_courant})
+  \item Anisotropic scattering (Rutherford-like forward-peaked)
+  \item Inelastic scattering with mass splitting (iSIDM)
+\end{enumerate}
+
+\section{Algorithm}
+
+For each leaf cell at each AMR level:
+\begin{enumerate}[nosep]
+  \item Collect all DM particles (\texttt{idp}>0 and \texttt{tp}$\le$0; ground state: \texttt{tp}=0, excited: \texttt{tp}=$-1$).
+  \item Fisher--Yates shuffle the particle list.
+  \item Form sequential pairs: $(1,2)$, $(3,4)$, \ldots
+  \item For each pair, compute cross-section $\sigma(v)/m$ based on the model (see below).
+  \item Compute scattering probability:
+    \[
+      P = \frac{\sigma(v)}{m}\,m_p\,v_{\mathrm{rel}}\,\frac{\Delta t}{V_{\mathrm{cell}}}\,(N_{\mathrm{DM}}-1)
+    \]
+  \item If a uniform random number $< P$, scatter the pair in the center-of-mass frame.
+\end{enumerate}
+
+\subsection{Velocity-Dependent Cross-Section}
+
+Three models are available via \texttt{sidm\_type}:
+\begin{itemize}[nosep]
+  \item \texttt{`constant'}: $\sigma/m = \sigma_0$ (default)
+  \item \texttt{`yukawa'}: $\sigma/m = \sigma_0 / (1 + (v/v_0)^2)^2$
+  \item \texttt{`power\_law'}: $\sigma/m = \sigma_0\,(v/v_0)^n$, capped at $10^4\sigma_0$
+\end{itemize}
+where $\sigma_0$ = \texttt{sidm\_cross\_section}, $v_0$ = \texttt{sidm\_v0} (km/s), $n$ = \texttt{sidm\_power}.
+
+\subsection{Anisotropic Scattering}
+
+When \texttt{sidm\_angular=`rutherford'}, the scattering angle $\theta$ is sampled from a
+Rutherford-like differential cross-section:
+\[
+  \frac{d\sigma}{d\Omega} \propto \frac{1}{(1-\cos\theta+2\epsilon)^2}
+\]
+where $\epsilon$ = \texttt{sidm\_epsilon} controls the forward-peakedness
+($\epsilon\to 0$: strongly peaked, $\epsilon\to\infty$: isotropic).
+The CDF is analytically invertible:
+\[
+  \cos\theta = 1+2\epsilon - \frac{1}{b + R(a-b)}, \quad a=\frac{1}{2\epsilon},\; b=\frac{1}{2+2\epsilon}
+\]
+The scattered direction is then rotated from the $\hat{v}_{\mathrm{rel}}$ frame to the lab frame.
+
+\subsection{Inelastic Scattering (iSIDM)}
+
+When \texttt{sidm\_inelastic=.true.}, DM particles have two states:
+ground (mass $m$, \texttt{tp}=0) and excited (mass $m+\delta$, \texttt{tp}=$-1$),
+where $\delta$ = \texttt{sidm\_delta} in keV.
+Scattering channels:
+\begin{itemize}[nosep]
+  \item $g+g \to e+e$ (endothermic): requires $\tfrac{1}{2}\mu v_{\mathrm{rel}}^2 > 2\delta c^2$
+  \item $e+e \to g+g$ (exothermic): always allowed, releases $2\delta c^2$
+  \item $g+e \to g+e$ (elastic): no energy change
+\end{itemize}
+The relative velocity magnitude is adjusted to conserve total energy in the COM frame.
+Initial excited fraction is set by \texttt{sidm\_frac\_excited} (applied once at startup;
+restart-safe via pre-existing excited particle detection).
+
+\subsection{Timestep Constraint}
+
+The maximum scattering probability $P_{\max}$ is tracked per level.
+In \texttt{newdt\_fine}, the timestep is constrained:
+\[
+  \Delta t_{\mathrm{new}} \le \frac{C_{\mathrm{SIDM}}}{P_{\max}} \,\Delta t_{\mathrm{old}}
+\]
+where $C_{\mathrm{SIDM}}$ = \texttt{sidm\_courant} (default 0.1).
+
+Momentum is exactly conserved for all scattering types.
+Kinetic energy is exactly conserved for elastic scattering and changes by
+$\pm 2\delta c^2$ for inelastic events.
+
+\section{Diagnostic Output}
+
+At each AMR level, if any scattering events occur, the code reports:
+\begin{lstlisting}[style=fortran,numbers=none]
+ SIDM level 14: scattered=      19 pairs=     52129 Pmax= 1.23E-04
+   dp(x,y,z)=  1.8692E+35  2.5961E+34 -5.1923E+34
+   dEk_total= -1.2631E+44  dp_max=  1.1749E+35
+   dEk_max  =  5.0177E+43
+   iSIDM: up-scatter=     2 down-scatter=     3
+\end{lstlisting}
+where:
+\begin{itemize}[nosep]
+  \item \texttt{scattered}: number of pairs that actually scattered (Monte Carlo accepted)
+  \item \texttt{pairs}: total number of DM particle pairs evaluated
+  \item \texttt{Pmax}: maximum scattering probability (used for timestep constraint)
+  \item \texttt{dp(x,y,z)}: cumulative momentum change $\Delta\mathbf{p}$ (g\,cm/s)
+  \item \texttt{dEk\_total}: cumulative kinetic energy change $\Delta E_k$ (erg)
+  \item \texttt{dp\_max}, \texttt{dEk\_max}: maximum single-event $|\Delta\mathbf{p}|$ and $|\Delta E_k|$
+  \item \texttt{iSIDM}: endothermic (up) and exothermic (down) scatter counts (only with \texttt{sidm\_inelastic})
+\end{itemize}
+For elastic scattering, \texttt{dp} and \texttt{dEk} should be at machine-precision level ($\sim 10^{-15}$ relative), confirming exact conservation.
+For inelastic scattering, \texttt{dEk} reflects the intentional energy transfer $\pm 2\delta c^2$.
+
+\section{Namelist Configuration}
+
+\begin{codebox}[SIDM basic example ($\sigma/m = 1\,$cm$^2$/g, isotropic elastic)]
+\begin{lstlisting}[style=fortran,numbers=none]
+&RUN_PARAMS
+sidm = .true.
+pic  = .true.
+/
+
+&SIDM_PARAMS
+sidm_cross_section = 1.0    ! sigma/m [cm^2/g]
+sidm_npart_min     = 2      ! min DM particles per cell
+/
+\end{lstlisting}
+\end{codebox}
+
+\begin{codebox}[SIDM extended example (Yukawa + Rutherford + iSIDM)]
+\begin{lstlisting}[style=fortran,numbers=none]
+&SIDM_PARAMS
+sidm_cross_section = 10.0   ! sigma_0/m [cm^2/g]
+sidm_type          = 'yukawa'
+sidm_v0            = 100.0   ! reference velocity [km/s]
+sidm_courant       = 0.1     ! max allowed P per step
+sidm_angular       = 'rutherford'
+sidm_epsilon       = 0.01    ! forward-peaked
+sidm_inelastic     = .true.
+sidm_delta         = 100.0   ! mass splitting [keV]
+sidm_frac_excited  = 0.1     ! 10% initially excited
+/
+\end{lstlisting}
+\end{codebox}
+
+\section{Modified Files}
+
+\begin{longtable}{L{6.5cm} L{7cm}}
+\toprule
+\textbf{File} & \textbf{Changes} \\
+\midrule
+\endhead
+\texttt{sidm\_scatter.f90} & Monte Carlo scattering with all 4 extensions \\
+\texttt{amr\_parameters.jaehyun.f90} & All SIDM parameters (12 variables) \\
+\texttt{read\_params.jaehyun.f90} & Read \texttt{\&SIDM\_PARAMS} namelist; validation \\
+\texttt{amr\_step.jaehyun.f90} & Call \texttt{sidm\_scatter} after \texttt{synchro\_fine} \\
+\texttt{newdt\_fine.kjhan.f90} & SIDM timestep constraint via $P_{\max}$ \\
+\texttt{Makefile} & Add \texttt{sidm\_scatter.o} to \texttt{SIDM\_OBJ} \\
+\bottomrule
+\end{longtable}
 
 
 %------------------------------------------------------
@@ -1685,6 +2644,32 @@ Runtime control parameters.
 \multicolumn{4}{l}{\textit{Job control (new)}} \\
 \midrule
 \texttt{jobcontrolfile} & char(128) & \texttt{''} & Runtime control file for stop/output requests \\
+\midrule
+\multicolumn{4}{l}{\textit{FFTW3 direct Poisson solver (new)}} \\
+\midrule
+\texttt{use\_fftw} & logical & \texttt{.false.} & FFTW3 CPU direct FFT solve for uniform levels (Ch.~\ref{ch:fftw3}) \\
+\midrule
+\multicolumn{4}{l}{\textit{Neutrino linear response (new)}} \\
+\midrule
+\texttt{use\_neutrino} & logical & \texttt{.false.} & Enable massive neutrino correction in Poisson solver (Ch.~\ref{ch:neutrino}) \\
+\midrule
+\multicolumn{4}{l}{\textit{Non-standard models (new)}} \\
+\midrule
+\texttt{de\_perturb} & logical & \texttt{.false.} & Enable DE density perturbation (Ch.~\ref{ch:cpl}) \\
+\texttt{dump\_pk} & logical & \texttt{.false.} & Dump matter $P(k)$ at each snapshot output \\
+\texttt{sidm} & logical & \texttt{.false.} & Enable SIDM Monte Carlo scattering (Ch.~\ref{ch:sidm}) \\
+\midrule
+\multicolumn{4}{l}{\textit{Exchange method auto-tuning (new)}} \\
+\midrule
+\texttt{exchange\_method} & char & \texttt{auto} & MPI exchange method: \texttt{auto}, \texttt{p2p}, \texttt{ksection} \\
+\midrule
+\multicolumn{4}{l}{\textit{GPU sink feedback (new)}} \\
+\midrule
+\texttt{gpu\_sink} & logical & \texttt{.false.} & GPU-accelerated AGN feedback kernels \\
+\midrule
+\multicolumn{4}{l}{\textit{Sink particle load balancing (new)}} \\
+\midrule
+\texttt{mem\_weight\_sink} & real(dp) & 500 & Computational cost weight per sink for memory-based LB \\
 \bottomrule
 \end{longtable}
 
@@ -1879,6 +2864,132 @@ Subgrid physics parameters (star formation, feedback, cooling).
 
 
 %======================================================
+\chapter{COSMO\_PARAMS}
+\label{ch:cosmo_params_nml}
+%======================================================
+
+Optional block for cosmological parameter overrides.  When absent,
+values are read from the IC header.  CPL dark energy parameters have
+moved to \texttt{\&CPL\_PARAMS} (Ch.~\ref{ch:cpl_params_nml}), neutrino
+parameters to \texttt{\&NEUTRINO\_PARAMS} (Ch.~\ref{ch:neutrino_params_nml}),
+and SIDM parameters to \texttt{\&SIDM\_PARAMS} (Ch.~\ref{ch:sidm_params_nml}).
+
+\begin{longtable}{L{3.5cm} C{1.8cm} C{1.8cm} L{6cm}}
+\toprule
+\textbf{Parameter} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+\midrule
+\endhead
+\texttt{omega\_b} & real(dp) & 0.0 & Baryon density $\Omega_b$ \\
+\texttt{omega\_m} & real(dp) & 1.0 & Matter density $\Omega_m$ \\
+\texttt{omega\_l} & real(dp) & 0.0 & Dark energy density $\Omega_{\mathrm{de}}$ \\
+\texttt{h0} & real(dp) & 1.0 & Hubble constant $H_0$ (km/s/Mpc) \\
+\bottomrule
+\end{longtable}
+
+\noindent
+\textbf{Notes:}
+\begin{itemize}[nosep]
+  \item The cosmological parameters (\texttt{omega\_b}, \texttt{omega\_m}, \texttt{omega\_l}, \texttt{h0}) in this block override values read from the IC header.
+  \item Omitting the block entirely is safe; the code will use IC header values.
+\end{itemize}
+
+
+%======================================================
+\chapter{CPL\_PARAMS}
+\label{ch:cpl_params_nml}
+%======================================================
+
+CPL dark energy equation-of-state parameters.  When absent (or when
+$w_0 = -1$, $w_a = 0$), the code recovers $\Lambda$CDM.
+See Chapter~\ref{ch:cpl} for the full mathematical description.
+
+\begin{longtable}{L{3.5cm} C{1.8cm} C{1.8cm} L{6cm}}
+\toprule
+\textbf{Parameter} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+\midrule
+\endhead
+\texttt{w0} & real(dp) & $-1$ & Present-day DE EoS: $w(a) = w_0 + w_a(1-a)$ \\
+\texttt{wa} & real(dp) & 0 & Time variation of DE EoS \\
+\texttt{cs2\_de} & real(dp) & 0 & DE sound speed squared $c_s^2$ (for DE perturbation) \\
+\texttt{de\_table} & char(256) & \texttt{''} & Path to CAMB DE transfer function table ($R_{\mathrm{DE}}(k,a)$) \\
+\bottomrule
+\end{longtable}
+
+\noindent
+\textbf{Notes:}
+\begin{itemize}[nosep]
+  \item $w_0$, $w_a$ are not stored in the GRAFIC2 IC header (fixed 44-byte layout).  They must be specified here when using CPL dark energy.
+  \item Setting $w_0=-1$, $w_a=0$ (or omitting the block) produces results \textbf{bit-identical} to the original $\Lambda$CDM code.
+  \item \texttt{de\_perturb} (activation flag) is in \texttt{\&RUN\_PARAMS}.
+  \item \texttt{de\_table}: generate with \texttt{python3 misc/generate\_de\_table.py --w0=... --wa=... --cs2=...}.
+\end{itemize}
+
+
+%======================================================
+\chapter{NEUTRINO\_PARAMS}
+\label{ch:neutrino_params_nml}
+%======================================================
+
+Massive neutrino linear response parameters.
+See Chapter~\ref{ch:neutrino} for the implementation details.
+
+\begin{longtable}{L{3.5cm} C{1.8cm} C{1.8cm} L{6cm}}
+\toprule
+\textbf{Parameter} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+\midrule
+\endhead
+\texttt{omega\_nu} & real(dp) & 0 & Neutrino density $\Omega_\nu$ ($\Omega_m$ includes $\Omega_\nu$) \\
+\texttt{neutrino\_table} & char(256) & \texttt{''} & Path to CAMB transfer function table \\
+\bottomrule
+\end{longtable}
+
+\noindent
+\textbf{Notes:}
+\begin{itemize}[nosep]
+  \item \texttt{use\_neutrino} (activation flag) is in \texttt{\&RUN\_PARAMS}.
+  \item \texttt{omega\_nu}: $\Omega_\nu = \Sigma m_\nu / (93.14\,h^2\;\text{eV})$.  For the minimal mass ($\Sigma m_\nu = 0.06\,$eV, $h=0.6774$): $\Omega_\nu \approx 0.00140$.
+  \item \texttt{neutrino\_table}: generate with \texttt{python3 misc/generate\_neutrino\_table.py}.
+\end{itemize}
+
+
+%======================================================
+\chapter{SIDM\_PARAMS}
+\label{ch:sidm_params_nml}
+%======================================================
+
+SIDM Monte Carlo scattering parameters.  Supports constant, velocity-dependent,
+anisotropic, and inelastic scattering.
+Requires \texttt{sidm=.true.}\ in \texttt{\&RUN\_PARAMS} and \texttt{pic=.true.}.
+See Chapter~\ref{ch:sidm} for the algorithm description.
+
+\begin{longtable}{L{3.8cm} C{1.8cm} C{1.8cm} L{5.7cm}}
+\toprule
+\textbf{Parameter} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+\midrule
+\endhead
+\multicolumn{4}{l}{\textit{Cross-section}} \\
+\texttt{sidm\_cross\_section} & real(dp) & 1.0 & $\sigma_0/m$ (cm$^2$/g) \\
+\texttt{sidm\_type} & char(16) & \texttt{constant} & Model: \texttt{constant}, \texttt{yukawa}, \texttt{power\_law} \\
+\texttt{sidm\_v0} & real(dp) & 100 & Reference velocity $v_0$ (km/s) \\
+\texttt{sidm\_power} & real(dp) & $-4$ & Power-law index $n$ \\
+\texttt{sidm\_npart\_min} & integer & 2 & Min DM particles per cell \\
+\midrule
+\multicolumn{4}{l}{\textit{Timestep}} \\
+\texttt{sidm\_courant} & real(dp) & 0.1 & Max allowed $P$ per step \\
+\midrule
+\multicolumn{4}{l}{\textit{Angular distribution}} \\
+\texttt{sidm\_angular} & char(16) & \texttt{isotropic} & \texttt{isotropic} or \texttt{rutherford} \\
+\texttt{sidm\_epsilon} & real(dp) & 0.01 & Rutherford regularization $\epsilon$ \\
+\midrule
+\multicolumn{4}{l}{\textit{Inelastic (iSIDM)}} \\
+\texttt{sidm\_inelastic} & logical & F & Enable inelastic scattering \\
+\texttt{sidm\_delta} & real(dp) & 0 & Mass splitting $\delta$ (keV) \\
+\texttt{sidm\_frac\_excited} & real(dp) & 0 & Initial excited DM fraction \\
+\bottomrule
+\end{longtable}
+
+
+%======================================================
 \chapter{Example Namelist}
 %======================================================
 
@@ -2038,6 +3149,17 @@ mpirun -np 12 ./ramses_final3d \
 
 Verify that at step 10: \texttt{econs=3.77E-03}, \texttt{epot=-1.88E-06}, \texttt{ekin=1.23E-06}.
 
+\begin{codebox}[DE P(k) Validation Test]
+\begin{lstlisting}[style=bash,numbers=none]
+cd test_ksection/run_de_pk_test
+python3 ../../misc/de_linear_test_setup.py
+bash run_all.sh     # runs 4 models (LCDM, wCDM, thaw, phantom)
+python3 ../../misc/compare_pk_camb.py --basedir .
+\end{lstlisting}
+\end{codebox}
+
+Verify that $P_{\rm sim}(k)/P_{\rm CAMB}(k) \approx 0.96$ in the linear regime ($k < 0.1\,h$/Mpc) for all four models across redshifts $z=0$--5.  The wCDM and CPL-thaw models should show 1--2\% enhancement relative to $\Lambda$CDM due to dark energy perturbations.
+
 
 %------------------------------------------------------
 % Appendix
@@ -2060,7 +3182,7 @@ Verify that at step 10: \texttt{econs=3.77E-03}, \texttt{epot=-1.88E-06}, \textt
 \texttt{ksection.f90} & K-section tree + exchange routines \\
 \texttt{load\_balance.kjhan.f90} & numbp sync, bulk exchange, internal timing \\
 \texttt{virtual\_boundaries.kjhan.f90} & Ksec ghost exchange + bulk + build\_comm \\
-\texttt{multigrid\_fine\_commons.f90} & MG ksection communication \\
+\texttt{multigrid\_fine\_commons.f90} & MG ksection communication; FFTW3 direct solver + sparse P2P \\
 \texttt{init\_amr.f90} & Memory savings, Morton init \\
 \texttt{update\_time.f90} & Memory reporting \\
 \texttt{adaptive\_loop.jaehyun.f90} & writemem\_minmax, Morton rebuild, bulk exchange \\
@@ -2079,14 +3201,16 @@ Verify that at step 10: \texttt{econs=3.77E-03}, \texttt{epot=-1.88E-06}, \textt
 \texttt{init\_part.f90} & Stream access particle IC \\
 \texttt{particle\_tree.kjhan.f90} & MPI\_ALLTOALL $\to$ ksection \\
 \texttt{amr\_step.jaehyun.f90} & Bulk virtual exchange \\
-\texttt{feedback.kjhan3.f90} & SNII feedback spatial binning \\
+\texttt{feedback.kjhan3.f90} & SNII feedback spatial binning, ksection exchange, ALLREDUCE packing \\
+\texttt{sink\_particle.kjhan.f90} & Sink particle ops, AGN spatial binning, ALLREDUCE packing, ksection reduce-sum \\
 \midrule
 \multicolumn{2}{l}{\textit{patch/cuda/ (HDF5 I/O --- new files)}} \\
 \midrule
 \texttt{ramses\_hdf5\_io.f90} & HDF5 wrapper module (parallel create/open/write/read) \\
 \texttt{backup\_hdf5.f90} & HDF5 output: AMR, hydro, gravity, particles, sinks \\
 \texttt{restore\_hdf5.f90} & HDF5 restart: AMR tree rebuild + data restore \\
-\texttt{output\_amr.kjhan.f90} & HDF5 dispatch in \texttt{dump\_all} \\
+\texttt{output\_amr.kjhan.f90} & HDF5 dispatch in \texttt{dump\_all}; $P(k)$ call when \texttt{dump\_pk} \\
+\texttt{power\_spectrum.f90} & NGP+FFTW3 matter power spectrum module \\
 \bottomrule
 \end{longtable}
 

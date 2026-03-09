@@ -354,7 +354,9 @@ def main():
         pars.InitPower.set_params(ns=n_s, As=A_s)
 
     pars.WantTransfer = True
-    pars.set_matter_power(redshifts=redshifts, kmax=100.0)
+    # Always include z=0 for sigma8 normalization, even if not requested
+    camb_redshifts = sorted(set(redshifts) | {0.0}, reverse=True)
+    pars.set_matter_power(redshifts=camb_redshifts, kmax=100.0)
     pars.NonLinear = model.NonLinear_none
 
     # ---- run CAMB ----
@@ -405,8 +407,15 @@ def main():
         de_model=de_model, w0=w0, wa=wa,
     )
 
+    # Only write files for user-requested redshifts (not the auto-added z=0)
+    requested_set = set(redshifts)
+
     for iz_td in range(nz_td):
         z = z_transfer[iz_td]
+
+        # Skip redshifts that were only added for sigma8 normalization
+        if not any(abs(z - zr) < 1e-6 for zr in requested_set):
+            continue
 
         # File naming: single-z → <root>_transfer_out.dat
         #              multi-z  → <root>_transfer_out_z<NNN>.dat

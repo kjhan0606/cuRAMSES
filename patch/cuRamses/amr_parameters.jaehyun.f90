@@ -72,6 +72,9 @@ module amr_parameters
   ! FFTW3 CPU direct Poisson solver (requires USE_FFTW compilation)
   logical::use_fftw=.false.    ! FFTW3 CPU direct solve for uniform base level
 
+  ! Power spectrum measurement at output time (requires USE_FFTW)
+  logical::dump_pk=.false.     ! Dump P(k) at each output snapshot
+
   ! Exchange method auto-tune (P2P vs K-Section hierarchical)
   ! 'auto': auto-tune per component, 'p2p': force P2P, 'ksection': force K-Section
   character(len=16)::exchange_method='auto'
@@ -190,7 +193,8 @@ module amr_parameters
   real(dp)::w0    =-1.0D0     ! DE equation of state w0 (CPL: w=w0+wa*(1-a))
   real(dp)::wa    = 0.0D0     ! DE equation of state wa (CPL)
   real(dp)::cs2_de= 0.0D0     ! DE sound speed squared (c_s^2)
-  logical ::de_perturb=.false. ! Enable DE perturbation in Poisson solver (cs2_de>0)
+  logical ::de_perturb=.false. ! Enable DE perturbation in Poisson solver
+  character(LEN=256)::de_table=''  ! Path to CAMB DE transfer function table
   ! Neutrino linear response
   logical::use_neutrino=.false.          ! Enable neutrino linear response in Poisson solver
   character(LEN=256)::neutrino_table=''  ! Path to CAMB transfer function table
@@ -282,6 +286,32 @@ module amr_parameters
   logical ::bhspinmerge=.true.
   logical ::selfgrav=.true.
   logical ::mad_jet=.false.
+
+  ! Cooling method selection (runtime namelist)
+  ! 'original': RAMSES solve_cooling (default)
+  ! 'exact'   : Eunha exact_integrate (Grackle + Townsend)
+  ! 'compare' : run both, use original for physics, report diagnostics
+  character(LEN=16)::cooling_method='original'
+  character(LEN=256)::grackle_table='grackle_multi_z.bin'
+
+  ! SIDM (Self-Interacting Dark Matter) parameters
+  logical ::sidm=.false.            ! Enable SIDM Monte Carlo scattering
+  real(dp)::sidm_cross_section=1.0d0 ! sigma/m [cm^2/g] (sigma_0 for velocity-dependent)
+  integer ::sidm_npart_min=2         ! Minimum DM particles per cell for scattering
+  ! Velocity-dependent cross-section: 'constant', 'yukawa', 'power_law'
+  character(len=16)::sidm_type='constant'
+  real(dp)::sidm_v0=100.0d0         ! Reference velocity [km/s] for yukawa/power_law
+  real(dp)::sidm_power=-4.0d0       ! Power-law index (only for 'power_law')
+  ! Timestep constraint
+  real(dp)::sidm_courant=0.1d0      ! Max allowed scattering probability per step
+  real(dp),dimension(1:MAXLEVEL)::sidm_Pmax=0.0d0  ! Max P per level (runtime)
+  ! Angular distribution: 'isotropic' or 'rutherford'
+  character(len=16)::sidm_angular='isotropic'
+  real(dp)::sidm_epsilon=0.01d0     ! Rutherford regularization (small=forward-peaked)
+  ! Inelastic scattering (iSIDM)
+  logical ::sidm_inelastic=.false.  ! Enable inelastic scattering
+  real(dp)::sidm_delta=0.0d0        ! Mass splitting delta [keV]
+  real(dp)::sidm_frac_excited=0.0d0 ! Initial excited DM fraction
 
 
 
