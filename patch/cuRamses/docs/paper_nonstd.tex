@@ -38,10 +38,14 @@
 \newcommand{\vcm}{\mathbf{v}_{\rm cm}}
 \newcommand{\sigmam}{\sigma/m}
 \newcommand{\kms}{\,\mathrm{km\,s^{-1}}}
+\newcommand{\azero}{a_0}
+\newcommand{\gN}{\mathbf{g}_{\rm N}}
+\newcommand{\gM}{\mathbf{g}_{\rm M}}
+\newcommand{\rhoph}{\rho_{\rm ph}}
 
-\title[cuRAMSES~II: Non-Standard Cosmological Models]
-{cuRAMSES~II: CPL Dark Energy Perturbations, Massive Neutrino
-Linear Response, and Self-Interacting Dark Matter
+\title[cuRAMSES~III: Non-Standard Cosmological Models]
+{cuRAMSES~III: CPL Dark Energy Perturbations, Massive Neutrino
+Linear Response, Self-Interacting Dark Matter, and QUMOND/AQUAL
 in Adaptive Mesh Refinement Simulations}
 
 \author[J.~Kim]{
@@ -67,7 +71,7 @@ $^{1}$Center for Advanced Computation, Korea Institute for Advanced Study,
 % ===================================================================
 \begin{abstract}
 We present extensions to the \curamses\ adaptive mesh refinement (AMR)
-code that enable cosmological hydrodynamic simulations with three
+code that enable cosmological hydrodynamic simulations with four
 classes of non-standard physics beyond $\Lambda$CDM: (i)~CPL dark
 energy with dynamical equation of state $w(a)=w_0+w_a(1-a)$ and
 density perturbations, implemented via a table-based linear response
@@ -76,27 +80,33 @@ dark energy for arbitrary sound speed $\cst$; (ii)~massive neutrino
 linear response, in which the neutrino density perturbation is
 obtained as a scale-dependent multiple of the CDM+baryon perturbation
 using precomputed \camb\ transfer function ratios $\Rnu(k,a)$, without
-the need for neutrino particles; and (iii)~self-interacting dark
+the need for neutrino particles; (iii)~self-interacting dark
 matter (SIDM) Monte Carlo scattering, supporting constant,
 velocity-dependent (Yukawa and power-law), and anisotropic
 (Rutherford-like) differential cross-sections, as well as inelastic
-(excited-state) scattering channels.  All three modules are
-implemented within a unified Poisson solver framework in which
-neutrino and dark energy corrections enter as multiplicative factors
-in Fourier space, composing naturally with the existing multigrid and
-FFT solver infrastructure.  The SIDM module uses cell-based random
-pairing with Fisher--Yates shuffling, exact centre-of-mass-frame
-velocity updates ensuring machine-precision momentum and energy
-conservation, and deterministic OpenMP threading.  Each module is
-controlled by dedicated namelist blocks and is verified to recover
-$\Lambda$CDM results when disabled.  We describe the algorithms, unit
-conversions, and numerical validation, providing a self-contained
-reference for non-standard cosmological simulations with AMR codes.
+(excited-state) scattering channels; and (iv)~Modified Newtonian
+Dynamics in both the quasi-linear (QUMOND) and aquadratic-Lagrangian
+(AQUAL) formulations, with three modes: an algebraic force correction,
+a single-pass phantom density re-solve (QUMOND), and a self-consistent
+iterative solver (AQUAL) that converges the nonlinear modified Poisson
+equation via fixed-point iteration.  An external field effect (EFE) is
+supported in all three modes for isolated galaxy simulations.  The dark energy and neutrino
+modules are implemented within a unified Poisson solver framework in
+which the corrections enter as multiplicative factors in Fourier
+space, composing naturally with the existing multigrid and FFT solver
+infrastructure.  The SIDM module uses cell-based random pairing with
+Fisher--Yates shuffling, exact centre-of-mass-frame velocity updates
+ensuring machine-precision momentum and energy conservation, and
+deterministic OpenMP threading.  Each module is controlled by
+dedicated namelist blocks and is verified to recover $\Lambda$CDM
+results when disabled.  We describe the algorithms, unit conversions,
+and numerical validation, providing a self-contained reference for
+non-standard cosmological simulations with AMR codes.
 \end{abstract}
 
 \begin{keywords}
 methods: numerical -- cosmology: simulations -- dark energy --
-neutrinos -- dark matter
+neutrinos -- dark matter -- gravitation -- modified gravity
 \end{keywords}
 
 % ===================================================================
@@ -120,7 +130,15 @@ small-scale tensions --- the core--cusp, missing satellites, and
 too-big-to-fail problems --- have motivated self-interacting dark
 matter (SIDM) models in which DM particles scatter elastically or
 inelastically with non-negligible cross-sections
-\citep{Spergel2000,Tulin2018}.
+\citep{Spergel2000,Tulin2018}.  An alternative explanation of these
+small-scale phenomena, as well as of galaxy rotation curves without
+dark matter, is provided by Modified Newtonian Dynamics (MOND;
+\citealt{Milgrom1983}), in which the gravitational acceleration is
+enhanced below a critical threshold $\azero \approx 1.2 \times
+10^{-8}\,\mathrm{cm\,s^{-2}}$.  The quasi-linear formulation of MOND
+(QUMOND; \citealt{Milgrom2010}) recasts this modification as a
+modified Poisson equation that can be solved with standard numerical
+methods.
 
 Precision cosmological surveys such as DESI \citep{DESI2024}, Euclid
 \citep{EuclidCollaboration2024}, and the Vera C.\ Rubin Observatory
@@ -130,7 +148,7 @@ Full hydrodynamic simulations that simultaneously capture baryonic
 physics and non-standard dark-sector models are essential for this
 programme.
 
-In this paper we describe the implementation of three non-standard
+In this paper we describe the implementation of four non-standard
 cosmological modules in \curamses\ \citep{Kim2026}, a suite of
 algorithmic and GPU-acceleration optimizations for the \ramses\ AMR
 code \citep{Teyssier2002}:
@@ -153,6 +171,12 @@ code \citep{Teyssier2002}:
   supporting constant, velocity-dependent, anisotropic, and
   inelastic cross-sections, with exact momentum and energy
   conservation.
+
+\item \textbf{QUMOND} (Section~\ref{sec:mond}): Modified Newtonian
+  Dynamics via the quasi-linear formulation, with two operational
+  modes --- algebraic force correction and full phantom dark matter
+  density re-solve --- providing a curl-free MOND gravitational
+  field compatible with the AMR Poisson solver infrastructure.
 \end{enumerate}
 
 All three modules are designed to compose with the existing \curamses\
@@ -164,7 +188,7 @@ structures.
 The structure of this paper is as follows.
 Section~\ref{sec:poisson_framework} reviews the unified Poisson solver
 framework into which the dark energy and neutrino corrections are
-embedded.  Sections~\ref{sec:de}--\ref{sec:sidm} describe each module
+embedded.  Sections~\ref{sec:de}--\ref{sec:mond} describe each module
 in detail.  Section~\ref{sec:verification} presents verification
 tests, and Section~\ref{sec:conclusions} concludes.
 
@@ -849,7 +873,379 @@ Parameter & Type & Default & Description \\
 
 
 % ===================================================================
-% 6. VERIFICATION
+% 6. QUMOND AND AQUAL
+% ===================================================================
+\section{MODIFIED NEWTONIAN DYNAMICS (QUMOND AND AQUAL)}
+\label{sec:mond}
+
+\subsection{Physical Motivation}
+\label{sec:mond_motivation}
+
+Modified Newtonian Dynamics \citep{Milgrom1983} postulates that the
+effective gravitational acceleration deviates from the Newtonian
+prediction $\gN$ when $|\gN| \lesssim \azero$, where $\azero \approx
+1.2 \times 10^{-8}\,\mathrm{cm\,s^{-2}}$ is a universal acceleration
+scale.  MOND successfully reproduces observed galaxy rotation curves,
+the baryonic Tully--Fisher relation, and the radial acceleration
+relation without invoking dark matter on galactic scales
+\citep{Famaey2012,Milgrom2014,McGaugh2016}.
+
+A key requirement for $N$-body implementations is that the modified
+gravitational field be derivable from a potential (i.e.\ curl-free), so
+that energy is conserved.  The quasi-linear formulation of MOND
+(QUMOND; \citealt{Milgrom2010}) achieves this by defining the MOND
+potential $\Phi$ through a modified Poisson equation:
+\begin{equation}
+\nabla^2 \Phi = \nabla \cdot \bigl[\nu(|\nabla\Phi_{\rm N}|/\azero)
+\,\nabla\Phi_{\rm N}\bigr],
+\label{eq:qumond}
+\end{equation}
+where $\Phi_{\rm N}$ is the standard Newtonian potential satisfying
+$\nabla^2 \Phi_{\rm N} = 4\pi G\rho$, and $\nu(y)$ is an
+interpolation function satisfying $\nu \to 1$ for $y \gg 1$
+(Newtonian regime) and $\nu \to y^{-1/2}$ for $y \ll 1$ (deep-MOND
+regime).
+
+An alternative, more fundamental formulation is AQUAL (AQUAdratic
+Lagrangian; \citealt{Bekenstein1984}), which derives from an action
+principle.  The AQUAL modified Poisson equation is
+\begin{equation}
+\nabla \cdot \bigl[\mu(|\nabla\Phi|/\azero)\,\nabla\Phi\bigr]
+= 4\pi G\rho,
+\label{eq:aqual}
+\end{equation}
+where $\mu(x)$ is the MOND interpolation function satisfying
+$\mu \to 1$ for $x \gg 1$ and $\mu \to x$ for $x \ll 1$.  Unlike
+QUMOND, the coefficient $\mu$ depends on the MOND potential $\Phi$
+itself, making equation~(\ref{eq:aqual}) nonlinear.  The $\mu$ and
+$\nu$ functions are related: for the simple family, $\mu(x) = x/(1+x)$
+and $\nu(y) = \tfrac{1}{2} + \tfrac{1}{2}\sqrt{1+4/y}$, where
+$y = x\mu(x)$.
+
+\subsection{Interpolation Functions}
+\label{sec:mond_nu}
+
+We implement two standard interpolation functions, selected by
+\code{mond\_mu\_type}:
+\begin{itemize}
+\item \textbf{Simple} (\code{mond\_mu\_type=1}): corresponding to
+  $\mu(x)=x/(1+x)$, the $\nu$-function is
+  \begin{equation}
+  \nu(y) = \frac{1}{2} + \frac{1}{2}\sqrt{1 + 4/y}.
+  \label{eq:nu_simple}
+  \end{equation}
+
+\item \textbf{Standard} (\code{mond\_mu\_type=2}): corresponding to
+  $\mu(x)=x/\sqrt{1+x^2}$, the $\nu$-function is
+  \begin{equation}
+  \nu(y) = \sqrt{\frac{1}{2} + \frac{1}{2}\sqrt{1 + 4/y^2}}.
+  \label{eq:nu_standard}
+  \end{equation}
+\end{itemize}
+Here $y \equiv |\gN|/\azero$ with $\gN = -\nabla\Phi_{\rm N}$.  Both
+functions are evaluated cell-by-cell from the Newtonian force array
+$f_i = -\partial\Phi_{\rm N}/\partial x_i$ that is already computed by
+\code{force\_fine}.
+
+For AQUAL (Phase~2), the corresponding $\mu$-functions are:
+\begin{itemize}
+\item \textbf{Simple}: $\mu(x) = x/(1+x)$, so $\mu - 1 = -1/(1+x)$.
+\item \textbf{Standard}: $\mu(x) = x/\sqrt{1+x^2}$, so
+  $\mu - 1 = x/\sqrt{1+x^2} - 1$.
+\end{itemize}
+Note that $\mu - 1 < 0$ always (since $\mu < 1$), whereas
+$\nu - 1 > 0$ always (since $\nu > 1$).
+
+\subsection{Phase~0: Algebraic Force Correction}
+\label{sec:mond_phase0}
+
+The simplest implementation (\code{mond\_type=0}) applies the QUMOND
+correction algebraically:
+\begin{equation}
+f_i^{\rm MOND} = \nu(|\mathbf{f}|/\azero)\, f_i,
+\label{eq:mond_algebraic}
+\end{equation}
+where $\mathbf{f}$ is the Newtonian force vector.  This is performed
+in the subroutine \code{apply\_mond\_force}, called immediately after
+\code{gradient\_phi} within \code{force\_fine}.
+
+This approach is computationally inexpensive (a single pass over all
+cells with no additional Poisson solve) and sufficient for
+spherically symmetric mass distributions where the curl of $\nu\gN$
+vanishes by symmetry.  However, for general mass distributions the
+resulting field $\nu\gN$ is not curl-free, leading to a
+non-conservative force and energy conservation violations.
+
+\subsection{Phase~1: Full QUMOND with Phantom Density}
+\label{sec:mond_phase1}
+
+To guarantee a curl-free MOND gravitational field, the full QUMOND
+formulation (\code{mond\_type=1}) introduces a \emph{phantom dark
+matter density} $\rhoph$ and re-solves the Poisson equation.  Expanding
+equation~(\ref{eq:qumond}):
+\begin{equation}
+\nabla^2 \Phi = \nabla^2 \Phi_{\rm N} + \nabla\cdot\bigl[(\nu-1)
+\nabla\Phi_{\rm N}\bigr]
+= 4\pi G\rho + 4\pi G\rhoph,
+\label{eq:phantom_split}
+\end{equation}
+so the phantom density is
+\begin{equation}
+\rhoph = \frac{1}{4\pi G}\,\nabla\cdot\bigl[(\nu-1)
+\nabla\Phi_{\rm N}\bigr]
+= -\frac{1}{4\pi G}\,\nabla\cdot\bigl[(\nu-1)\,\mathbf{f}\bigr],
+\label{eq:rho_phantom}
+\end{equation}
+where we used $\nabla\Phi_{\rm N} = -\mathbf{f}$.  In cosmological
+mode, $4\pi G$ is replaced by $\tfrac{3}{2}\Om a$.
+
+\subsubsection{Divergence computation}
+
+The divergence in equation~(\ref{eq:rho_phantom}) is computed using
+second-order centred differences on the AMR grid:
+\begin{equation}
+\nabla\cdot\bigl[(\nu-1)\mathbf{f}\bigr] \approx
+\sum_{d=1}^{3} \frac{h_d^{+} - h_d^{-}}{2\,\Delta x},
+\label{eq:div_fd}
+\end{equation}
+where $h_d^{\pm} = [\nu(|\mathbf{f}|/\azero) - 1]\,f_d$ evaluated at
+the right ($+$) and left ($-$) face-neighbours in dimension $d$.  The
+neighbour cell indices are obtained from the same \code{ggg}/\code{hhh}
+lookup tables used by \code{gradient\_phi} in \code{force\_fine},
+ensuring consistent stencil geometry.  At coarse--fine level boundaries
+where a face-neighbour grid does not exist at the current refinement
+level (\code{igridn}${}=0$), the cell is skipped; this affects only a
+small fraction of cells near AMR boundaries.
+
+\subsubsection{Algorithm}
+
+The full QUMOND algorithm within a single AMR level proceeds as:
+\begin{enumerate}
+\item Solve the standard Poisson equation:
+  $\nabla^2\Phi_{\rm N} = 4\pi G\rho$.
+\item Compute Newtonian forces:
+  $\mathbf{f} = -\nabla\Phi_{\rm N}$ via \code{force\_fine}.
+\item Compute phantom density $\rhoph$ from equation~(\ref{eq:rho_phantom})
+  and add to $\rho$ in-place (\code{compute\_mond\_phantom\_density}).
+\item Exchange boundaries for the modified $\rho$.
+\item Re-solve the Poisson equation:
+  $\nabla^2\Phi = 4\pi G(\rho + \rhoph)$.
+\item Compute MOND forces:
+  $\mathbf{f}_{\rm MOND} = -\nabla\Phi$ via \code{force\_fine}.
+\end{enumerate}
+Steps 3--6 are inserted in \code{amr\_step} between the initial
+\code{force\_fine} call and the particle synchronisation
+(\code{synchro\_fine}).  The algebraic correction
+(\code{apply\_mond\_force}) is automatically disabled when
+\code{mond\_type}$\geq 1$.
+
+\subsubsection{Thread safety}
+
+The phantom density computation is fully thread-safe under OpenMP:
+each cell's $\rho$ is modified by exactly one thread (the cell index
+is determined uniquely by the grid--octant pair in the parallel loop),
+while the neighbour force values $\mathbf{f}$ are accessed read-only.
+All temporary variables (neighbour indices, $\nu-1$ values, divergence
+accumulator) are declared \code{private}.
+
+\subsection{Phase~2: AQUAL Iterative Solver}
+\label{sec:mond_phase2}
+
+The AQUAL formulation (\code{mond\_type=2}) solves the nonlinear
+modified Poisson equation~(\ref{eq:aqual}) self-consistently via
+fixed-point iteration.  Rewriting equation~(\ref{eq:aqual}) as
+\begin{equation}
+\nabla^2 \Phi = 4\pi G\rho + \nabla\cdot\bigl[(\mu - 1)\,\mathbf{f}\bigr],
+\label{eq:aqual_split}
+\end{equation}
+where $\mathbf{f} = -\nabla\Phi$ and $\mu = \mu(|\mathbf{f}|/\azero)$,
+we define an AQUAL phantom density
+\begin{equation}
+\rhoph^{\rm AQUAL} = +\frac{1}{4\pi G}\,\nabla\cdot\bigl[(\mu - 1)
+\,\mathbf{f}\bigr].
+\label{eq:rho_phantom_aqual}
+\end{equation}
+Note the sign difference from the QUMOND phantom density
+(equation~\ref{eq:rho_phantom}): the QUMOND term uses $\nu - 1 > 0$
+with a minus sign, while the AQUAL term uses $\mu - 1 < 0$ with a
+plus sign; both yield positive $\rhoph$ in the deep-MOND regime.
+
+\subsubsection{Algorithm}
+
+The AQUAL iteration proceeds as follows:
+\begin{enumerate}
+\item Solve the standard Poisson equation to obtain the Newtonian force
+  $\mathbf{f}^{(0)} = -\nabla\Phi_{\rm N}$.
+\item For $n = 0, 1, \ldots, n_{\rm iter}$:
+  \begin{enumerate}
+  \item Restore $\rho$ to the baryonic density $\rho_{\rm bary}$.
+  \item Compute the AQUAL phantom density
+    $\rhoph^{(n)} = +\nabla\cdot[(\mu-1)\mathbf{f}^{(n)}]/(4\pi G)$.
+  \item Add $\rhoph^{(n)}$ to $\rho$ and exchange boundaries.
+  \item Re-solve the Poisson equation:
+    $\nabla^2\Phi^{(n+1)} = 4\pi G(\rho + \rhoph^{(n)})$.
+  \item Compute $\mathbf{f}^{(n+1)} = -\nabla\Phi^{(n+1)}$.
+  \item Check convergence:
+    $\max|\mathbf{f}^{(n+1)} - \mathbf{f}^{(n)}| /
+    \max|\mathbf{f}^{(n+1)}| < \epsilon$.
+  \end{enumerate}
+\item Return the converged force $\mathbf{f}^{(\rm final)}$.
+\end{enumerate}
+The convergence criterion $\epsilon$ is controlled by
+\code{mond\_eps} (default $10^{-6}$).  Convergence is monitored
+globally across all MPI ranks via \code{MPI\_ALLREDUCE} with
+the \code{MPI\_MAX} operator.
+
+\subsubsection{Implementation}
+
+The iteration is implemented in the subroutine \code{aqual\_iterate},
+called from \code{amr\_step} when \code{mond\_type=2}.  The
+baryonic density is saved in a temporary array at the start of the
+iteration and restored at each step to prevent accumulation of
+phantom density.  The existing \code{compute\_mond\_phantom\_density}
+routine is reused with a logical flag \code{is\_aqual} that selects
+between $\nu - 1$ (QUMOND) and $\mu - 1$ (AQUAL), and applies the
+appropriate sign convention.
+
+Each iteration calls the full multigrid (or FFT) Poisson solver and
+\code{force\_fine}, which automatically use the GPU-accelerated or
+FFTW3 code paths when available.  The multigrid solver overwrites
+the $f()$ array internally (using it as scratch for
+residual/RHS/mask), so \code{force\_fine} must be called after each
+solve to reconstruct the forces.
+
+\subsection{External Field Effect}
+\label{sec:mond_efe}
+
+In MOND, an external gravitational field $\mathbf{g}_{\rm ext}$
+breaks the internal dynamics of a subsystem, even if it is
+uniform (the ``external field effect'' or EFE;
+\citealt{Milgrom1983,Bekenstein1984}).  This is relevant for
+isolated galaxy simulations embedded in a large-scale tidal field.
+
+We implement the EFE by replacing $\mathbf{f}$ with
+$\mathbf{f} + \mathbf{g}_{\rm ext}$ in the argument of the
+interpolation function.  The external field is specified via
+\code{g\_ext\_mond(1:3)} in CGS units and converted to code
+units at each timestep.  The EFE modifies each MOND mode:
+\begin{itemize}
+\item \textbf{Phase~0}: $f_d^{\rm MOND} = \nu(|\mathbf{f}+
+  \mathbf{g}_{\rm ext}|/\azero)\,f_d + (\nu - 1)\,g_{{\rm ext},d}$.
+\item \textbf{Phase~1}: the divergence uses $(\nu-1)
+  (f_d + g_{{\rm ext},d})$.
+\item \textbf{Phase~2}: the divergence uses $(\mu-1)
+  (f_d + g_{{\rm ext},d})$.
+\end{itemize}
+When $\mathbf{g}_{\rm ext} = 0$ (the default), all expressions reduce
+to the standard EFE-free forms.  For cosmological periodic boxes the
+EFE is automatically zero.
+
+\subsection{Cosmological Considerations}
+\label{sec:mond_cosmo}
+
+In cosmological $N$-body simulations, the Poisson equation uses the
+density contrast and the force $\mathbf{f}$ represents the peculiar
+gravitational acceleration (the perturbation from the homogeneous
+Hubble flow).  The MOND correction is therefore applied to $|\mathbf{f}|$
+rather than to the total gravitational acceleration.  This ``naive
+cosmological QUMOND'' approach is the standard choice for MOND
+$N$-body cosmological codes
+\citep{Lughausen2015,Candlish2015,Nagesh2021} and is valid in the
+quasi-static regime relevant for structure formation.
+
+The critical acceleration $\azero$ is specified in CGS units
+($\mathrm{cm\,s^{-2}}$) and converted to code units at each timestep
+via
+\begin{equation}
+\azero^{\rm code} = \azero / (L_{\rm box}/t_{\rm code}^2),
+\end{equation}
+where $L_{\rm box}$ and $t_{\rm code}$ are the time-dependent code
+length and time units returned by the \ramses\ \code{units()} routine.
+Since these depend on the scale factor $a$, the code-unit threshold
+evolves correctly with cosmic time.
+
+\subsection{Performance Impact}
+\label{sec:mond_perf}
+
+Phase~0 (\code{mond\_type=0}) adds negligible overhead: a single pass
+over all cells to multiply $\mathbf{f}$ by $\nu$.  Phase~1
+(\code{mond\_type=1}) approximately doubles the Poisson solver cost
+per level, since the multigrid (or FFT) solve and \code{force\_fine}
+are each called twice.  For typical production runs where the Poisson
+solver accounts for ${\sim}36$\,per\,cent of the total step time, the
+overall cost increase is ${\sim}36$\,per\,cent (i.e.\ the total step
+time increases from $1.0\times$ to ${\sim}1.36\times$).
+
+Phase~2 (\code{mond\_type=2}) requires $N_{\rm iter}+1$ Poisson
+solves and force computations per level.  With a typical convergence
+in 5--10 iterations, the cost is ${\sim}6$--$11\times$ the baseline
+Poisson cost.  Using the FFTW3 base-level solver (28.9\,s per
+coarse step), Phase~2 with 10 iterations would cost ${\sim}300$\,s
+per coarse step.  This is acceptable for isolated galaxy simulations
+with moderate box sizes but prohibitive for large cosmological volumes.
+
+\subsection{Namelist Configuration}
+\label{sec:mond_namelist}
+
+The MOND module is enabled by setting \code{use\_mond=.true.} in
+\code{\&RUN\_PARAMS} and providing the physical parameters in a
+dedicated \code{\&MOND\_PARAMS} block:
+
+\begin{table}
+\centering
+\caption{MOND namelist parameters (\code{\&MOND\_PARAMS}).}
+\label{tab:mond_params}
+\small
+\begin{tabular}{llll}
+\toprule
+Parameter & Type & Default & Description \\
+\midrule
+\code{a0\_mond}      & real    & $1.2\times10^{-8}$ & $\azero$ [cm\,s$^{-2}$] \\
+\code{mond\_mu\_type} & integer & 1 & 1=simple, 2=standard \\
+\code{mond\_type}     & integer & 0 & 0=algebraic, 1=QUMOND, 2=AQUAL \\
+\code{n\_iter\_mond}  & integer & 10 & Max AQUAL iterations (type=2 only) \\
+\code{mond\_eps}      & real    & $10^{-6}$ & AQUAL convergence threshold \\
+\code{g\_ext\_mond}   & real(3) & 0,0,0 & External field [cm\,s$^{-2}$] (EFE) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A minimal QUMOND example:
+\begin{verbatim}
+&RUN_PARAMS
+use_mond=.true.
+/
+
+&MOND_PARAMS
+a0_mond=1.2d-8
+mond_mu_type=1
+mond_type=1
+/
+\end{verbatim}
+
+An AQUAL example with external field:
+\begin{verbatim}
+&MOND_PARAMS
+a0_mond=1.2d-8
+mond_mu_type=1
+mond_type=2
+n_iter_mond=10
+mond_eps=1d-6
+g_ext_mond=0d0,0d0,1d-9
+/
+\end{verbatim}
+
+The code validates that \code{poisson=.true.} when MOND is enabled,
+that $\azero > 0$, that \code{mond\_mu\_type}$\in\{1,2\}$, and that
+\code{mond\_type}$\in\{0,1,2\}$.  For \code{mond\_type=2},
+\code{n\_iter\_mond}$\geq 1$ and \code{mond\_eps}${}>0$ are required.
+A warning is issued if \code{pic=.true.}
+(dark matter particles present), since MOND is designed to replace
+dark matter rather than augment it.
+
+
+% ===================================================================
+% 7. VERIFICATION
 % ===================================================================
 \section{VERIFICATION}
 \label{sec:verification}
@@ -886,6 +1282,14 @@ nominally enabled but set to produce no physical effect:
 
 \item \textbf{SIDM}: \code{sidm=.false.}.  The scattering routine is
   not called.  Result: bit-identical to baseline.
+
+\item \textbf{MOND}: \code{use\_mond=.true.} with $\azero$ set to an
+  extremely small value (${\sim}10^{-30}\,\mathrm{cm\,s^{-2}}$),
+  placing all cells deep in the Newtonian regime ($\nu \approx 1$,
+  $\mu \approx 1$).
+  All three modes (\code{mond\_type=0}, 1, and 2) recover the
+  baseline forces.  Setting \code{use\_mond=.false.} is
+  bit-identical to the reference run.
 \end{itemize}
 
 \subsection{SIDM Conservation}
@@ -918,6 +1322,28 @@ The deterministic per-thread seed initialisation
 per-event diagnostics are identical between OMP${}=1$ and OMP${}=5$
 runs, verifying that the threading does not introduce spurious
 stochasticity.
+
+\subsection{MOND Phase Consistency}
+\label{sec:verify_mond}
+
+For a spherically symmetric mass distribution, the curl of
+$\nu\gN$ vanishes, so Phase~0 (algebraic) and Phase~1 (phantom
+density) should produce identical forces.  We verify this by
+comparing the force field at a high-density peak region in the
+test snapshot: the relative difference $|\mathbf{f}_{\rm Phase\,0} -
+\mathbf{f}_{\rm Phase\,1}|/|\mathbf{f}_{\rm Phase\,1}|$ is at the
+$10^{-3}$ level near the peak (where the geometry is approximately
+spherical) and reaches a few per~cent in asymmetric regions, as
+expected from the non-vanishing curl field that Phase~1 correctly
+removes.
+
+For Phase~2 (AQUAL), the converged solution should agree with
+QUMOND in the curl-free limit (spherical symmetry).  In general
+mass distributions the two formulations differ because AQUAL solves
+for a self-consistent potential while QUMOND uses the Newtonian
+potential as input.  The AQUAL iteration convergence is monitored
+at each step via the relative force change
+$\max|\Delta\mathbf{f}|/\max|\mathbf{f}|$.
 
 \subsection{Neutrino Power Spectrum Suppression}
 \label{sec:verify_nu_pk}
@@ -977,7 +1403,7 @@ correctly reproduces the \camb\ predictions.
 \section{CONCLUSIONS}
 \label{sec:conclusions}
 
-We have presented three non-standard cosmological modules for the
+We have presented four non-standard cosmological modules for the
 \curamses\ AMR code:
 
 \begin{enumerate}
@@ -1002,10 +1428,19 @@ We have presented three non-standard cosmological modules for the
   and anisotropic (Rutherford) cross-sections, plus inelastic
   (excited-state) channels.  Momentum and energy conservation are
   exact to machine precision.
+
+\item \textbf{QUMOND and AQUAL}: Modified Newtonian Dynamics via three
+  modes: an algebraic force correction (Phase~0), a QUMOND phantom
+  density re-solve (Phase~1), and an AQUAL iterative solver (Phase~2)
+  that converges the nonlinear modified Poisson equation via
+  fixed-point iteration (Section~\ref{sec:mond}).  An external field
+  effect (EFE) is supported in all three modes.  All modes support
+  simple and standard interpolation functions and are compatible
+  with the cosmological Poisson solver.
 \end{enumerate}
 
-All three modules are designed within a unified Poisson solver
-framework in which neutrino and dark energy corrections compose
+The dark energy and neutrino modules are designed within a unified
+Poisson solver framework in which the corrections compose
 multiplicatively in Fourier space (equation~\ref{eq:green_unified}).
 Each module is self-contained, controlled by dedicated namelist
 blocks, and verified to recover the $\Lambda$CDM baseline when
@@ -1021,8 +1456,8 @@ extensions.
 Future work will apply these modules to constrained-realisation
 simulations targeting DESI and Euclid survey volumes, enabling
 direct comparison of $\Lambda$CDM, $w_0w_a$CDM, $\nu\Lambda$CDM,
-and SIDM predictions for the halo mass function, galaxy clustering,
-and weak lensing observables.
+SIDM, and MOND predictions for the halo mass function, galaxy
+rotation curves, galaxy clustering, and weak lensing observables.
 
 
 % ===================================================================
@@ -1211,6 +1646,44 @@ Hahn O., Abel T., 2011, MNRAS, 415, 2101,
 \href{https://doi.org/10.1111/j.1365-2966.2011.18820.x}{doi:10.1111/j.1365-2966.2011.18820.x},
 \href{https://arxiv.org/abs/1103.6031}{arXiv:1103.6031}
 
+\bibitem[\protect\citeauthoryear{Milgrom}{Milgrom}{1983}]{Milgrom1983}
+Milgrom M., 1983, ApJ, 270, 365,
+\href{https://doi.org/10.1086/161130}{doi:10.1086/161130}
+
+\bibitem[\protect\citeauthoryear{Milgrom}{Milgrom}{2010}]{Milgrom2010}
+Milgrom M., 2010, MNRAS, 403, 886,
+\href{https://doi.org/10.1111/j.1365-2966.2009.16184.x}{doi:10.1111/j.1365-2966.2009.16184.x},
+\href{https://arxiv.org/abs/0911.5464}{arXiv:0911.5464}
+
+\bibitem[\protect\citeauthoryear{Milgrom}{Milgrom}{2014}]{Milgrom2014}
+Milgrom M., 2014, Scholarpedia, 9, 31410,
+\href{https://doi.org/10.4249/scholarpedia.31410}{doi:10.4249/scholarpedia.31410}
+
+\bibitem[\protect\citeauthoryear{Famaey \& McGaugh}{Famaey \& McGaugh}{2012}]{Famaey2012}
+Famaey B., McGaugh S.~S., 2012, Living Rev.\ Relativ., 15, 10,
+\href{https://doi.org/10.12942/lrr-2012-10}{doi:10.12942/lrr-2012-10},
+\href{https://arxiv.org/abs/1112.3960}{arXiv:1112.3960}
+
+\bibitem[\protect\citeauthoryear{McGaugh, Lelli \& Schombert}{McGaugh et al.}{2016}]{McGaugh2016}
+McGaugh S.~S., Lelli F., Schombert J.~M., 2016, Phys.\ Rev.\ Lett., 117, 201101,
+\href{https://doi.org/10.1103/PhysRevLett.117.201101}{doi:10.1103/PhysRevLett.117.201101},
+\href{https://arxiv.org/abs/1609.05917}{arXiv:1609.05917}
+
+\bibitem[\protect\citeauthoryear{L{\"u}ghausen, Famaey \& Kroupa}{L{\"u}ghausen et al.}{2015}]{Lughausen2015}
+L{\"u}ghausen F., Famaey B., Kroupa P., 2015, Canadian J.\ Phys., 93, 232,
+\href{https://doi.org/10.1139/cjp-2014-0168}{doi:10.1139/cjp-2014-0168},
+\href{https://arxiv.org/abs/1405.5963}{arXiv:1405.5963}
+
+\bibitem[\protect\citeauthoryear{Candlish, Smith \& Fellhauer}{Candlish et al.}{2015}]{Candlish2015}
+Candlish G.~N., Smith R., Fellhauer M., 2015, MNRAS, 446, 1060,
+\href{https://doi.org/10.1093/mnras/stu2158}{doi:10.1093/mnras/stu2158},
+\href{https://arxiv.org/abs/1410.3844}{arXiv:1410.3844}
+
+\bibitem[\protect\citeauthoryear{Nagesh et al.}{Nagesh et al.}{2021}]{Nagesh2021}
+Nagesh S.~T., Banik I., Thies I., Kroupa P., Famaey B., L{\"u}ghausen F., Wittenburg N., Parziale R., 2021, Canadian J.\ Phys., 99, 607,
+\href{https://doi.org/10.1139/cjp-2020-0624}{doi:10.1139/cjp-2020-0624},
+\href{https://arxiv.org/abs/2009.12155}{arXiv:2009.12155}
+
 \end{thebibliography}
 
 
@@ -1241,6 +1714,7 @@ Parameter & Namelist & Type & Default & Description \\
 \code{sidm}             & \code{\&RUN\_PARAMS}      & logical & F   & Enable SIDM scattering \\
 \code{use\_neutrino}    & \code{\&RUN\_PARAMS}      & logical & F   & Enable neutrino linear response \\
 \code{de\_perturb}      & \code{\&RUN\_PARAMS}      & logical & F   & Enable DE perturbation \\
+\code{use\_mond}        & \code{\&RUN\_PARAMS}      & logical & F   & Enable QUMOND \\
 \code{dump\_pk}         & \code{\&RUN\_PARAMS}      & logical & F   & Dump matter $P(k)$ at each output \\
 \midrule
 \multicolumn{5}{l}{\emph{CPL dark energy (\code{\&CPL\_PARAMS})}} \\
@@ -1255,6 +1729,14 @@ Parameter & Namelist & Type & Default & Description \\
 \midrule
 \multicolumn{5}{l}{\emph{SIDM (\code{\&SIDM\_PARAMS})}} \\
 \multicolumn{5}{l}{See Table~\ref{tab:sidm_params}} \\
+\midrule
+\multicolumn{5}{l}{\emph{MOND (\code{\&MOND\_PARAMS})}} \\
+\code{a0\_mond}        & \code{\&MOND\_PARAMS}     & real    & $1.2\times10^{-8}$ & $\azero$ [cm\,s$^{-2}$] \\
+\code{mond\_mu\_type}  & \code{\&MOND\_PARAMS}     & integer & 1   & $\nu$/$\mu$-function: 1=simple, 2=standard \\
+\code{mond\_type}      & \code{\&MOND\_PARAMS}     & integer & 0   & 0=algebraic, 1=QUMOND, 2=AQUAL \\
+\code{n\_iter\_mond}   & \code{\&MOND\_PARAMS}     & integer & 10  & Max AQUAL iterations \\
+\code{mond\_eps}       & \code{\&MOND\_PARAMS}     & real    & $10^{-6}$ & AQUAL convergence threshold \\
+\code{g\_ext\_mond}    & \code{\&MOND\_PARAMS}     & real(3) & 0,0,0 & External field (EFE) [cm\,s$^{-2}$] \\
 \bottomrule
 \end{tabular}
 \end{table*}

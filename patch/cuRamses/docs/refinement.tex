@@ -1,0 +1,2181 @@
+% The Jeans Criterion in Cosmological AMR Simulations
+% J. Kim — cuRAMSES / Horizon-5
+%
+\documentclass[fleqn,usenatbib]{mnras}
+
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{newtxtext,newtxmath}
+\usepackage{hyperref}
+\renewcommand{\ttdefault}{cmtt}
+
+\lstset{
+  language=[90]Fortran,
+  basicstyle=\ttfamily\scriptsize,
+  keywordstyle=\bfseries\color{blue!70!black},
+  commentstyle=\itshape\color{gray},
+  frame=single,
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true
+}
+
+\newcommand{\lJ}{\lambda_{\rm J}}
+\newcommand{\nstar}{n_\star}
+\newcommand{\Tstar}{T_{2,\star}}
+\newcommand{\gstar}{g_\star}
+\newcommand{\dx}{\Delta x}
+\newcommand{\ramses}{\textsc{ramses}}
+\newcommand{\curamses}{\textsc{cuRAMSES}}
+\newcommand{\nlevelmax}{N_{\rm levelmax}}
+\newcommand{\twotondim}{2^{N_{\rm dim}}}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title[cuRAMSES~II: The Effect of Exact Cooling on the Adaptive Mesh Refinement]
+{cuRAMSES~II: The Effect of Exact Cooling on the Adaptive Mesh Refinement}
+
+\author[J. Kim]{Juhan Kim$^{1}$\thanks{E-mail: kjhan@kias.re.kr}
+\\
+$^{1}$Korea Institute for Advanced Study (KIAS),
+85 Hoegiro, Dongdaemun-gu, Seoul 02455, Republic of Korea}
+
+\date{Accepted XXX. Received XXX; in original form XXX}
+
+\pubyear{2026}
+
+\begin{document}
+\label{firstpage}
+\pagerange{\pageref{firstpage}--\pageref{lastpage}}
+\maketitle
+
+\begin{abstract}
+The Jeans length criterion is a fundamental numerical stability
+requirement in self-gravitating hydrodynamic simulations: failing to
+resolve it by at least four cell widths produces artificial
+fragmentation that contaminates the star formation history.  In
+cosmological adaptive mesh refinement (AMR) simulations, however,
+three distinct mechanisms conspire to violate or misapply this
+criterion.  First, the \emph{cosmological holdback} that prevents
+premature refinement at high redshift blocks the Jeans criterion
+along with all other refinement triggers, creating abrupt starbursts
+when levels are released.  Second, the standard Newton--Raphson
+cooling solver can overshoot the thermal equilibrium temperature
+$T_{\rm eq}$, introducing transient errors in the Jeans length
+evaluation.  Third, pre-computed cooling tables at a single redshift
+become stale as the UV background evolves.  We address all three
+issues in the \curamses\ code: (i)~a \emph{Jeans-independent
+holdback bypass} that allows the Jeans criterion to operate ahead of
+the holdback, with a configurable level limit to prevent runaway
+cascades; (ii)~an \emph{exact cooling integrator} based on the
+Townsend (2009) $Y$-function method applied to three-dimensional
+Grackle equilibrium cooling tables, eliminating Newton--Raphson
+overshooting; and (iii)~\emph{multi-redshift table interpolation}
+that tracks the evolving UV background across cosmic time.  We
+quantify how cooling rate differences between the standard
+\ramses\ solver and the Grackle library propagate into
+40--80\,per\,cent errors in the Jeans length at low densities,
+and demonstrate that the exact integrator removes the stochastic
+refinement noise caused by temperature overshooting.  Future
+extensions incorporating \emph{turbulent pressure support} into the
+Jeans criterion are outlined.
+\end{abstract}
+
+\begin{keywords}
+methods: numerical -- cosmology: simulations --
+stars: formation -- hydrodynamics -- instabilities --
+turbulence
+\end{keywords}
+
+
+%======================================================================
+\section{Introduction}
+\label{sec:intro}
+%======================================================================
+
+Gravitational instability is the fundamental driver of cosmic
+structure formation.  \citet{Jeans1902} showed that a uniform,
+self-gravitating medium is unstable to perturbations on scales
+exceeding the Jeans length
+\begin{equation}
+  \lJ = \sqrt{\frac{\pi\,c_s^2}{G\,\rho}},
+  \label{eq:jeans_intro}
+\end{equation}
+where $c_s$ is the sound speed and $\rho$ the gas density.  All
+scales below $\lJ$ are stabilised by thermal pressure; all scales
+above it collapse.  In astrophysical simulations of star-forming gas,
+the Jeans length therefore defines a \emph{minimum resolution
+requirement}: if the computational grid or particle spacing cannot
+resolve $\lJ$, the simulation produces qualitatively wrong results
+--- artificial fragmentation that bears no relation to the true
+physical outcome \citep{Truelove1997, Bate1997}.
+
+Cosmological simulations of galaxy formation must follow
+gravitational collapse across many orders of magnitude in spatial
+scale, from $\sim 100\,$Mpc cosmic web filaments down to
+$\sim 10\,$pc star-forming clouds.  Adaptive mesh refinement
+\citep[AMR;][]{Berger1984, Berger1989} achieves this by
+hierarchically subdividing cells in regions that require higher
+resolution, concentrating computational resources where they are
+needed.  Major AMR codes used in cosmological contexts include
+\ramses\ \citep{Teyssier2002}, Enzo \citep{Bryan2014}, and ART
+\citep{Kravtsov1997}.  Alternative numerical techniques --- smoothed
+particle hydrodynamics \citep[SPH;][]{Springel2005}, moving-mesh
+methods \citep{Springel2010}, and mesh-free finite-mass schemes
+\citep{Hopkins2015} --- face analogous resolution requirements
+\citep{Bate1997, Nelson2009}, but the AMR framework provides a
+particularly transparent mechanism for enforcing the Jeans condition:
+a cell is flagged for refinement whenever $\lJ < N_J\,\dx$, where
+$N_J$ is typically 4--8 and $\dx$ is the cell width
+\citep{Truelove1997}.
+
+In practice, however, enforcing the Jeans criterion in cosmological
+AMR simulations is complicated by three interacting effects:
+
+\textit{(i) Cosmological holdback.}  To prevent premature
+over-refinement at high redshift --- which would exhaust memory
+before the epoch of interest --- codes such as \ramses\ employ a
+\emph{holdback} mechanism that progressively releases refinement
+levels as the scale factor $a$ grows.  This holdback blocks
+\emph{all} refinement criteria simultaneously, including the Jeans
+criterion, which is a numerical \emph{stability} requirement rather
+than merely a resolution preference.  When a level is finally
+released, a burst of refinement and star formation follows
+\citep[see also][]{Dubois2014, Dubois2021}.
+
+\textit{(ii) Cooling accuracy.}  The Jeans length is proportional to
+$T^{1/2}$, so the equilibrium temperature $T_{\rm eq}$ of the gas
+directly determines whether refinement is triggered.  $T_{\rm eq}$ is
+set by the balance between radiative cooling and photo-heating by the
+ultraviolet (UV) background \citep{HM2012, FG2020}.  Errors in the
+cooling rate tables \citep{Sutherland1993, Ferland2017}, the UV
+background model \citep{Courty2004}, or the numerical integration
+scheme all propagate into errors in $T_{\rm eq}$ and hence in $\lJ$.
+The standard \ramses\ cooling solver uses a semi-implicit
+Newton--Raphson (N-R) iteration that is known to overshoot $T_{\rm eq}$
+when the net cooling rate changes sign
+\citep[cf.][]{Townsend2009}, introducing stochastic noise into the
+Jeans length evaluation.  The Grackle equilibrium chemistry library
+\citep{Smith2017} provides more accurate cooling rates --- including
+density-dependent metal cooling and non-local thermodynamic
+equilibrium (non-LTE) molecular weights --- but the standard tabulated
+approach still requires a robust numerical integrator to avoid
+overshooting.
+
+\textit{(iii) Redshift evolution.}  The metagalactic UV background
+evolves strongly with redshift: it rises during cosmic reionisation
+($z \gtrsim 6$), peaks near $z \sim 2$--$3$, and declines towards
+$z = 0$ \citep{HM2012, FG2020}.  A cooling table computed at a single
+redshift becomes increasingly inaccurate as the simulation evolves
+away from that epoch, producing systematic biases in $T_{\rm eq}$ and
+$\lJ$ that can reach factors of 2--3 during the He~{\sc ii}
+reionisation epoch ($z \sim 3$--$4$).
+
+Beyond thermal pressure, \emph{turbulence} provides an additional
+source of pressure support that can significantly modify the effective
+Jeans length.  \citet{Chandrasekhar1951} and \citet{Bonazzola1987}
+showed that turbulent motions increase the effective sound speed from
+$c_s$ to $(c_s^2 + \sigma_{\rm turb}^2)^{1/2}$, where $\sigma_{\rm
+turb}$ is the turbulent velocity dispersion, yielding a turbulent
+Jeans length
+\begin{equation}
+  \lJ^{\rm turb} =
+  \sqrt{\frac{\pi\,(c_s^2 + \sigma_{\rm turb}^2)}{G\,\rho}}.
+  \label{eq:jeans_turb}
+\end{equation}
+In the interstellar medium (ISM), turbulence is driven by supernova
+feedback, gravitational infall, magnetorotational instability, and
+galactic shear \citep{Robertson2008, Kim2017, Hopkins2018}.
+Subgrid-scale (SGS) turbulence models
+\citep{Schmidt2006, Schmidt2011, Rennehan2021} can estimate the
+unresolved turbulent energy on the grid scale, providing an in-situ
+value of $\sigma_{\rm turb}$ that can be fed into the refinement
+criterion.  In the context of star formation,
+\citet{Federrath2012} showed that turbulence
+simultaneously \emph{supports} gas on large scales (raising the
+effective Jeans mass) and \emph{compresses} gas locally (triggering
+collapse in overdense regions), so the net effect on refinement is
+scale-dependent.  \citet{Semenov2016} demonstrated that a
+turbulence-dependent star formation model produces more realistic
+star formation histories than density-threshold prescriptions.
+Incorporating turbulent pressure support into the AMR Jeans criterion
+--- using either resolved velocity gradients or SGS models --- is a
+natural extension that we plan to address in future work.
+
+Large-volume cosmological simulations such as Horizon-AGN
+\citep{Dubois2014}, EAGLE \citep{Schaye2015}, IllustrisTNG
+\citep{Pillepich2018}, NewHorizon \citep{Dubois2021}, and Horizon
+Run~5 \citep[HR5;][]{Lee2021} rely on accurate Jeans length
+resolution to produce converged star formation rates and galaxy
+properties.  Any systematic error in the Jeans criterion ---
+whether from the holdback, cooling inaccuracies, or the neglect of
+turbulent pressure --- propagates into the predicted stellar masses,
+morphologies, and feedback histories.
+
+In this paper we present three improvements to the handling of the
+Jeans criterion in cosmological AMR simulations, implemented in
+\curamses:
+\begin{enumerate}
+  \item An \emph{improved cooling module} that combines 3D Grackle
+    equilibrium cooling tables with the \citet{Townsend2009} exact
+    integration scheme and multi-redshift interpolation, eliminating
+    the N-R overshooting that contaminates the Jeans length near
+    thermal equilibrium (Section~\ref{sec:exact_cooling}).
+  \item A \emph{Jeans-independent holdback bypass} that allows the
+    Jeans criterion to operate ahead of the cosmological holdback,
+    with a configurable level limit to prevent uncontrolled refinement
+    cascades (Section~\ref{sec:bypass}).
+  \item Analysis of the \emph{polytropic temperature floor} and its
+    role in self-regulating the bypass cascade through physics-based
+    density thresholds (Section~\ref{sec:polytropic}).
+\end{enumerate}
+We also outline future directions for incorporating turbulent
+pressure support into the Jeans criterion
+(Section~\ref{sec:turbulence}).
+
+The paper is organised as follows.
+Section~\ref{sec:amr_refine} reviews AMR refinement in \ramses,
+including the holdback mechanism.
+Section~\ref{sec:exact_cooling} describes the exact cooling integrator
+and multi-redshift tables.
+Section~\ref{sec:cooling} analyses the cooling rates and their impact
+on the Jeans length.
+Section~\ref{sec:starburst} identifies the starburst problem caused
+by the holdback.
+Section~\ref{sec:bypass} presents the Jeans bypass solution.
+Section~\ref{sec:polytropic} discusses the polytropic floor.
+Section~\ref{sec:implementation} gives implementation details.
+Section~\ref{sec:tests} shows test results.
+Section~\ref{sec:discussion} discusses implications, and
+Section~\ref{sec:conclusions} summarises our findings.
+
+
+%======================================================================
+\section{AMR Refinement in \ramses}
+\label{sec:amr_refine}
+%======================================================================
+
+\ramses\ \citep{Teyssier2002} is a grid-based AMR code that solves
+the coupled Euler--Poisson--Boltzmann equations on a fully threaded
+octree.  Each cell at level $\ell < \nlevelmax$ is tested for
+refinement at every coarse time-step.  The decision to subdivide a
+cell into $\twotondim$ children is governed by a combination of
+physical, geometric, and cosmological criteria.
+
+\subsection{Refinement Logic}
+\label{sec:refine_logic}
+
+The overall refinement flag for a cell is determined by the following
+Boolean expression:
+\begin{equation}
+\mathcal{R} = \lnot\,\mathcal{H}
+  \;\land\; \mathcal{G}
+  \;\land\; \bigl(
+    \mathcal{M} \lor \mathcal{S} \lor \mathcal{D} \lor \mathcal{P}
+    \lor \mathcal{U} \lor \mathcal{J}
+  \bigr),
+\label{eq:refine_flag}
+\end{equation}
+where each symbol is defined below.
+
+\subsubsection{Physical Criteria (OR)}
+
+\begin{enumerate}
+
+\item \textbf{Quasi-Lagrangian mass criterion ($\mathcal{M}$).}
+  The cell is flagged if its gas density exceeds a
+  level-dependent threshold:
+  \begin{equation}
+    \rho_{\rm cell} \;\ge\; m_{\rm refine}(\ell)
+      \;\frac{m_{\rm sph}}{V_{\rm cell}},
+  \end{equation}
+  where $m_{\rm sph}$ is the effective SPH kernel mass and
+  $V_{\rm cell} = (\dx_\ell)^3$.
+  This criterion ensures that regions containing roughly
+  $m_{\rm refine}$ or more particles per cell are refined,
+  providing a quasi-Lagrangian resolution that tracks gravitational
+  collapse.  Controlled by the namelist array
+  \code{m\_refine(1:nlevelmax)}.
+
+\item \textbf{Sink particle forcing ($\mathcal{S}$).}
+  If \code{sink\_refine=.true.}, any cell containing a sink cloud
+  particle (identified by \code{idp}$\,< 0$ and \code{tp}$\,= 0$) is
+  unconditionally flagged up to $\nlevelmax$, guaranteeing maximum
+  resolution around each accretion region.
+
+\item \textbf{Density gradient ($\mathcal{D}$).}
+  The normalised density gradient between a cell and each of its
+  $2N_{\rm dim}$ face-neighbours is computed as
+  \begin{equation}
+    \epsilon_\rho = 2\,\max\!\left(
+      \frac{|\rho_+ - \rho_0|}{|\rho_+ + \rho_0| + \rho_{\rm floor}},\;
+      \frac{|\rho_0 - \rho_-|}{|\rho_0 + \rho_-| + \rho_{\rm floor}}
+    \right).
+  \end{equation}
+  If $\epsilon_\rho > \code{err\_grad\_d}$ along any axis, the cell
+  is flagged.
+
+\item \textbf{Pressure gradient ($\mathcal{P}$).}
+  Analogous to the density gradient but applied to the thermal
+  pressure:
+  \begin{equation}
+    \epsilon_P = 2\,\max\!\left(
+      \frac{|P_+ - P_0|}{|P_+ + P_0| + P_{\rm floor}},\;
+      \frac{|P_0 - P_-|}{|P_0 + P_-| + P_{\rm floor}}
+    \right),
+  \end{equation}
+  flagging when $\epsilon_P > \code{err\_grad\_p}$.
+
+\item \textbf{Velocity gradient ($\mathcal{U}$).}
+  A normalised velocity jump relative to the local sound speed:
+  \begin{equation}
+    \epsilon_v = 2\,\max\!\left(
+      \frac{|v_+ - v_0|}{c_{s,+} + c_{s,0} + |v_+| + |v_0|
+                          + v_{\rm floor}},\;
+      \frac{|v_0 - v_-|}{c_{s,0} + c_{s,-} + |v_0| + |v_-|
+                          + v_{\rm floor}}
+    \right),
+  \end{equation}
+  flagging when $\epsilon_v > \code{err\_grad\_u}$ in any component.
+
+\item \textbf{Jeans length ($\mathcal{J}$).}
+  When \code{jeans\_refine($\ell$)} $= N_J > 0$, the cell is flagged if
+  the local Jeans length is shorter than $N_J$ cell widths:
+  \begin{equation}
+    \lJ = \sqrt{\frac{\pi\,c_s^2}{G\,\rho}}
+    < N_J\,\dx_\ell,
+    \label{eq:jeans_crit}
+  \end{equation}
+  implementing the \citet{Truelove1997} condition to prevent artificial
+  fragmentation in self-gravitating gas.  An additional density
+  threshold \code{d\_jeans\_thre} restricts this criterion to cells
+  with $n_{\rm H} \ge \code{d\_jeans\_thre}$.
+
+\end{enumerate}
+
+\subsubsection{Geometry Mask (AND)}
+
+\textbf{Ellipsoidal region ($\mathcal{G}$).}
+When \code{r\_refine($\ell$)} $> -1$, only cells inside a generalised
+ellipsoidal region are permitted to refine.  The test is
+\begin{equation}
+  \left(
+    \frac{2|\Delta x|}{r}
+  \right)^{e_r}
+  + \left(
+    \frac{2|\Delta y|}{a\,r}
+  \right)^{e_r}
+  + \left(
+    \frac{2|\Delta z|}{b\,r}
+  \right)^{e_r}
+  < 1,
+\end{equation}
+where $r = \code{r\_refine}$, $a = \code{a\_refine}$,
+$b = \code{b\_refine}$, and $e_r = \code{exp\_refine}$.
+Cells outside this region are \emph{un-flagged} regardless of
+physical criteria, restricting high resolution to a zoom-in target.
+
+\subsubsection{Cosmological Holdback (NOT)}
+
+\textbf{Resolution holdback ($\mathcal{H}$).}
+In cosmological runs with cooling, overly eager refinement at high
+redshift can exhaust memory before the epoch of interest.
+When \code{q\_refine\_holdback=.true.} and the physical cell size
+$\dx_\ell < 4^{1/N_{\rm dim}}\,\dx_{\nlevelmax}/a_{\rm exp}$
+for levels $\ell > \code{nlevelmax\_part} + 3$, the \emph{entire}
+level is blocked from further refinement:
+\begin{equation}
+  \mathcal{H}(\ell) = \bigl[\ell > \ell_{\rm part} + \ell_{\rm collapse}\bigr]
+  \;\wedge\;
+  \bigl[\dx_\ell < 4^{1/N_{\rm dim}}\,\dx_{\rm min}/a\bigr],
+  \label{eq:holdback}
+\end{equation}
+where $\ell_{\rm part}$ is the particle initial-condition level
+(typically $\ell_{\rm min}$) and $\ell_{\rm collapse}=3$.
+The first holdback level $\ell_{\rm hb}$ is the smallest $\ell$
+satisfying equation~(\ref{eq:holdback}):
+\begin{equation}
+  \ell_{\rm hb} = \min\bigl\{\ell > \ell_{\rm part}+\ell_{\rm collapse}
+  \;:\; \dx_\ell < 4^{1/N_{\rm dim}}\,\dx_{\rm min}/a\bigr\}.
+  \label{eq:lhb}
+\end{equation}
+
+\subsection{Buffer Zones}
+
+After applying equation~(\ref{eq:refine_flag}), flagged cells are
+expanded by \code{nexpand($\ell$)} cell widths in each direction via a
+dilation operator (\code{smooth\_fine}).
+This cubic buffer ensures smooth refinement boundaries, preventing
+the Godunov solver from encountering abrupt level transitions.
+
+
+%======================================================================
+\section{Exact Cooling Integration}
+\label{sec:exact_cooling}
+%======================================================================
+
+The cooling module determines the equilibrium temperature $T_{\rm eq}$
+of the gas, which controls the Jeans length
+$\lJ \propto \sqrt{T/\rho}$ and hence the refinement decisions.
+Errors in the numerical integration scheme propagate directly into
+errors in $\lJ$ and may trigger (or suppress) refinement at the wrong
+density and temperature.  We implement an exact integration method
+based on the \citet{Townsend2009} $Y$-function, coupled with
+multi-redshift table interpolation to track the evolving UV background
+across cosmic time.
+
+
+\subsection{The Townsend Exact Integration Scheme}
+\label{sec:townsend}
+
+To eliminate the numerical overshooting inherent in implicit
+cooling solvers (see Section~\ref{sec:overshoot}), we implement the exact integration
+method of \citet{Townsend2009}, which transforms the cooling ODE into
+an analytically invertible form using the $Y$-function.
+
+\subsubsection{Y-Function Formulation}
+
+For a piecewise power-law cooling function
+$\Lambda(T) \propto T^{\alpha_j}$ in each temperature bin
+$[T_j, T_{j+1}]$, the integrated cooling variable is
+\begin{equation}
+  Y(T) = \int_{T_{\rm ref}}^{T} \frac{dT'}{T'\,\hat{\Lambda}(T')}
+  = \sum_{k} \Delta Y_k,
+  \label{eq:Y_func}
+\end{equation}
+where $\hat{\Lambda} = \Lambda/\Lambda_{\rm ref}$ is the normalised
+cooling rate.  Each segment contributes
+\begin{equation}
+  \Delta Y_j = \begin{cases}
+    \dfrac{T_j^{-\alpha_j} - T_{j+1}^{-\alpha_j}}
+          {\alpha_j\,\hat{\Lambda}_j\,T_j^{-\alpha_j}}
+    & (\alpha_j \ne 0), \\[6pt]
+    \dfrac{\ln(T_j/T_{j+1})}{\hat{\Lambda}_j}
+    & (\alpha_j = 0).
+  \end{cases}
+  \label{eq:deltaY}
+\end{equation}
+
+The exact temperature after a time-step $\Delta t$ is obtained by
+inverting the relation
+\begin{equation}
+  Y(T^{n+1}) = Y(T^n) + \Lambda_{\rm ref}\,\frac{n_{\rm H}}{E_0}\,\Delta t,
+  \label{eq:Y_advance}
+\end{equation}
+where $E_0 = (3/2)\,n_{\rm tot}\,k_{\rm B}$ is the thermal energy per
+unit temperature.  The inversion is performed by binary search on the
+cumulative $Y$-table and local analytic inversion within the identified
+segment.
+
+\subsubsection{Advantages Over Newton--Raphson}
+
+The $Y$-function scheme has several fundamental advantages:
+
+\begin{enumerate}
+  \item \textbf{No overshooting.}  The method integrates the cooling
+    equation \emph{exactly} for piecewise power-law rates.  The
+    temperature evolves monotonically towards the equilibrium; it cannot
+    oscillate across $T_{\rm eq}$.
+  \item \textbf{No sub-stepping.}  A single evaluation of
+    equation~(\ref{eq:Y_advance}) advances the solution by the full
+    hydrodynamic time-step, regardless of $t_{\rm cool}/\Delta t$.  The
+    N-R solver requires up to 500 sub-steps when $\Delta t \gg t_{\rm cool}$.
+  \item \textbf{Correct equilibrium.}  When $\Delta t \to \infty$,
+    $Y \to Y_{\rm eq}$ and the cell relaxes exactly to $T_{\rm eq}$.
+    The N-R solver only reaches $T_{\rm eq}$ asymptotically through
+    iteration, and may settle on the wrong side if the sub-step
+    structure interacts with the sign change.
+  \item \textbf{Deterministic.}  The result depends only on
+    $(T^n, n_{\rm H}, Z, \Delta t)$ and the cooling table, with no
+    sensitivity to iteration count, convergence tolerance, or adaptive
+    step heuristics.
+\end{enumerate}
+
+The cost is a table lookup and a $\log/\exp$ evaluation per cell
+($\sim$few $\mu$s), comparable to a single N-R sub-step.  Since the N-R
+solver typically requires 5--50 sub-steps, the exact scheme is faster
+for strongly cooling gas.
+
+\subsubsection{Implementation: Eunha Cooling Module}
+
+The exact integrator is implemented as a Fortran module
+(\code{eunha\_cooling\_mod.f90}) that reads a 3D Grackle equilibrium
+cooling table $\Lambda_{\rm net}(n_{\rm H}, Z, T)$ and pre-computes
+the cumulative $Y$-table.  The module provides three runtime modes
+selected by the namelist parameter \code{cooling\_method}:
+\begin{itemize}
+  \item \code{`original'} --- standard \ramses\ N-R solver (default,
+    no overhead);
+  \item \code{`exact'} --- Townsend exact integration replaces the N-R
+    solver;
+  \item \code{`compare'} --- both solvers run; the N-R result is used
+    for physics while per-step diagnostics report the difference
+    $\Delta T_2^{\rm orig} - \Delta T_2^{\rm exact}$.
+\end{itemize}
+
+The Grackle table adds a third axis (metallicity $Z$) with 40 bins
+spanning $10^{-6}$--$10\,Z_\odot$, compared to the 2D RAMSES table
+with linear $Z$ scaling.  The mean molecular weight $\mu(n_{\rm H}, Z, T)$
+is also tabulated from Grackle's non-LTE equilibrium, replacing the
+RAMSES CIE calculation.  The $T_2 \leftrightarrow T$ conversion uses an
+iterative scheme: $\mu \to T = T_2\,\mu \to \mu'(n_{\rm H}, Z, T) \to
+T' = T_2\,\mu'$, converging to $<0.1$\,per\,cent in 3 iterations.
+
+
+\subsection{Redshift-Dependent Cooling: Multi-z Tables}
+\label{sec:multi_z}
+
+The cooling rate depends on redshift through the UV background
+intensity $J_\nu(z)$, which evolves as the ionising photon production
+rate rises during cosmic reionisation ($z \gtrsim 6$), peaks near
+$z \sim 2$--$3$, and declines towards $z = 0$ as the star formation
+rate density decreases \citep{HM2012, FG2020}.
+The equilibrium temperature
+$T_{\rm eq}(n_{\rm H}, z)$ therefore evolves with redshift even at
+fixed density.
+
+\subsubsection{How the standard solver tracks redshift}
+
+The standard \ramses\ cooling module calls \code{set\_table(aexp)} at
+each coarse time-step, rebuilding the 2D cooling table
+$\Lambda(n_{\rm H}, T_2)$ using the Courty UV background model
+evaluated at the current expansion factor~$a$.  This analytic UV model
+is a polynomial fit to Cloudy~07, so the table rebuild is
+inexpensive and correctly tracks the redshift evolution of the
+background --- within the limitations of the Courty model itself
+(Section~\ref{sec:2d_table}).
+
+\subsubsection{The single-z limitation of the Grackle table}
+
+The Grackle-based Eunha module (\code{eunha\_cooling\_mod.f90})
+initially loaded a single pre-computed 3D table at a fixed redshift
+(e.g.\ $z = 5.1$ for the HR5 restart).  While the cooling rates are
+more accurate than the RAMSES 2D table at that redshift, the table
+becomes increasingly wrong as the simulation evolves away from the
+tabulated~$z$.  In particular:
+
+\begin{itemize}
+  \item At $z < z_{\rm table}$, the UV background is stronger (more
+    photo-heating), so the true $T_{\rm eq}$ is higher than the
+    tabulated value.  The exact integrator would drive cells to an
+    \emph{artificially low} equilibrium temperature, underestimating
+    $\lJ$ and potentially triggering spurious refinement.
+  \item At $z > z_{\rm table}$, the UV background is weaker, and the
+    exact integrator would settle on a $T_{\rm eq}$ that is too high,
+    overestimating $\lJ$ and suppressing refinement.
+  \item The most rapid UV evolution occurs during hydrogen reionisation
+    ($z \sim 6$--$8$) and He~{\sc ii} reionisation ($z \sim 3$--$4$),
+    where $T_{\rm eq}$ can change by factors of 2--3 over $\Delta z
+    \sim 1$.
+\end{itemize}
+
+\subsubsection{Multi-z table and runtime interpolation}
+
+We address this by pre-computing Grackle equilibrium tables at multiple
+redshifts and interpolating at runtime.  The offline generator
+(\code{generate\_multi\_z\_table.py}) calls the Grackle library at
+each redshift snapshot to produce a single multi-z binary file
+containing $N_z$ copies of the 3D table $(n_{\rm H}, Z, T)$.
+
+The default sampling uses 10~redshift snapshots:
+\begin{equation}
+  z \in \{0.0,\; 0.5,\; 1.0,\; 1.5,\; 2.0,\; 3.0,\; 4.0,\; 5.0,\;
+  7.0,\; 10.0\},
+  \label{eq:z_grid}
+\end{equation}
+with denser spacing at low~$z$ ($\Delta z = 0.5$ for $z \le 2$) where
+the UV background evolves most rapidly relative to the Hubble time, and
+coarser spacing at high~$z$ ($\Delta z \ge 1$).
+
+At each coarse time-step, \code{eunha\_interp\_redshift($z$)} performs
+the following:
+\begin{enumerate}
+  \item Finds the bracketing snapshots $z_i \le z < z_{i+1}$ and
+    computes the linear interpolation weight
+    $w = (z - z_i)/(z_{i+1} - z_i)$.
+  \item Interpolates the net cooling rate and mean molecular weight:
+    \begin{align}
+      \Lambda_{\rm net}(n_{\rm H}, Z, T; z)
+        &= (1{-}w)\,\Lambda^{(i)} + w\,\Lambda^{(i+1)}, \\
+      \mu(n_{\rm H}, Z, T; z)
+        &= (1{-}w)\,\mu^{(i)} + w\,\mu^{(i+1)}.
+    \end{align}
+  \item Rebuilds the cumulative $Y$-table for all
+    $N_{\rm dens} \times N_{\rm metal} = 60 \times 40 = 2400$ cells
+    (OpenMP parallelised).
+  \item Caches the current redshift; the rebuild is skipped if
+    $|\Delta z| < 0.01$.
+\end{enumerate}
+
+The total file size for 10 snapshots on the standard
+$60 \times 40 \times 256$ grid is
+$10 \times 2 \times 614400 \times 8 \approx 94\,$MB, which is
+distributed with the source code.  Backward compatibility with
+single-z files is maintained through automatic format detection
+(the first \code{int32} in a multi-z file encodes $N_z$, which is
+distinguishable from the grid dimension $L = 60$).
+
+\subsubsection{Impact on cooling overshoot}
+\label{sec:multi_z_overshoot}
+
+The multi-z table eliminates a systematic error that compounds with the
+numerical overshoot discussed in Section~\ref{sec:overshoot}.  Consider
+a simulation at $z = 2$ using a table computed at $z = 5$:
+
+\begin{enumerate}
+  \item The UV background at $z = 2$ is $\sim 3$--$5\times$ stronger
+    than at $z = 5$ \citep{HM2012}, so
+    $T_{\rm eq}^{z=2} > T_{\rm eq}^{z=5}$.
+  \item A cell cooling towards equilibrium at $z = 2$ would be driven
+    to the \emph{wrong} (lower) $T_{\rm eq}^{z=5}$ by the stale table.
+  \item Even with the exact integrator (no numerical overshoot), the
+    cell reaches an incorrect equilibrium, yielding a systematically
+    too-small Jeans length.
+  \item The N-R solver compounds this: it may overshoot below the
+    already-too-low $T_{\rm eq}^{z=5}$, further reducing $\lJ$.
+\end{enumerate}
+
+With the multi-z table, the Eunha module tracks the correct
+$T_{\rm eq}(z)$ at every coarse step, matching the \ramses\ solver's
+\code{set\_table(aexp)} behaviour but with the improved Grackle rates
+and the exact integration scheme.  The combination eliminates both
+the systematic error (wrong UV background) and the numerical error
+(N-R overshoot), providing the most accurate equilibrium temperature
+determination available within the operator-split cooling framework.
+
+
+\subsection{Solver Validation}
+\label{sec:cool_validation}
+
+We validate the Townsend exact integrator against an adaptive
+fourth-order Runge--Kutta (RK4) reference solution (tolerance
+$10^{-8}$) and the standard \ramses\ Newton--Raphson (N-R) subcycling
+solver.  Five test conditions at $z = 5$ are drawn from the multi-$z$
+Grackle table, spanning four decades in density and three decades in
+temperature (Table~\ref{tab:cool_tests}).
+
+\begin{table}
+\centering
+\caption{Test conditions for the cooling solver validation at $z=5$.
+  $t_{\rm cool}$ is the initial cooling time and $T_{\rm eq}$ is the
+  equilibrium temperature from the RK4 reference.}
+\label{tab:cool_tests}
+\begin{tabular}{lccccr}
+\toprule
+Name & $n_{\rm H}$ [cm$^{-3}$] & $T_0$ [K] & $Z/Z_\odot$ &
+  $t_{\rm cool}$ & $T_{\rm eq}$ [K] \\
+\midrule
+IGM        & $10^{-4}$ & $10^{6}$      & $10^{-3}$ & 1.6\,Gyr  & 15\,300 \\
+Filament   & $10^{-2}$ & $10^{5}$      & $10^{-2}$ & 4.3\,Myr  & 14\,500 \\
+ISM        & $1$       & $3\times10^4$ & $1$        & 126\,yr   &  4\,020 \\
+Dense hot  & $10^{2}$  & $10^{7}$      & $1$        & 43\,kyr   &    171  \\
+Strong     & $1$       & $10^{7}$      & $1$        & 4.3\,Myr  &  4\,020 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Time-step independence}
+
+Fig.~\ref{fig:cool_dtindep} shows the final temperature $T_{\rm final}$
+after a single cooling step as a function of $\Delta t / t_{\rm cool}$.
+The RK4 reference (black) and the Townsend integrator (blue) produce
+identical results across the full range
+$0.01 \le \Delta t / t_{\rm cool} \le 10^3$, demonstrating that the
+exact scheme is genuinely independent of the time-step size.  The N-R
+solver with $\Delta_{\rm var} = 4$ (red), $20$ (green), and $100$
+(magenta) converges to the same answer only when the time-step is
+short ($\Delta t \lesssim t_{\rm cool}$).
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{fig_cooling_dtindep.pdf}
+\caption{Final temperature after a single cooling step versus
+  $\Delta t / t_{\rm cool}$ for the five test conditions.  The
+  Townsend exact integrator (blue circles) overlaps the RK4 reference
+  (black line) at all time-steps.  The orange dashed line marks the
+  equilibrium temperature $T_{\rm eq}$.  The N-R solver (red, green,
+  magenta) converges only for small~$\Delta t$.}
+\label{fig:cool_dtindep}
+\end{figure*}
+
+\subsubsection{Accuracy of the N-R solver}
+
+Fig.~\ref{fig:cool_error} shows the relative error
+$|T_{\rm NR} - T_{\rm RK4}| / T_{\rm RK4}$ of the N-R solver as a
+function of the adaptive step parameter $\Delta_{\rm var}$, for a
+fixed time-step $\Delta t = 10\,t_{\rm cool}$.  The ISM condition
+(green) requires $\Delta_{\rm var} \approx 60$ to reach 1\,per\,cent
+accuracy, far exceeding the default value $\Delta_{\rm var} = 4$
+(vertical dashed line).  This reflects the steep cooling function
+near the hydrogen ionisation transition at
+$T \sim 10^4$--$3\times10^4\,$K, where the N-R step control
+$|\Delta T / T| \le 1/\Delta_{\rm var}$ is insufficiently fine to
+track the rapid equilibrium approach.  The Townsend integrator achieves
+$< 10^{-5}$ relative error for all conditions (not shown on this
+scale).
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{fig_cooling_error.pdf}
+\caption{Relative error of the N-R solver versus $\Delta_{\rm var}$
+  at $\Delta t = 10\,t_{\rm cool}$.  \textit{Left:} full range;
+  \textit{right:} practical range.  The grey dashed lines mark
+  1\,per\,cent and 0.1\,per\,cent thresholds.  The ISM condition
+  (green) requires $\Delta_{\rm var} \approx 60$ for 1\,per\,cent
+  accuracy.}
+\label{fig:cool_error}
+\end{figure*}
+
+Fig.~\ref{fig:cool_nsub} shows the number of N-R subcycles as a
+function of $\Delta_{\rm var}$.  The subcycle count scales as
+$N_{\rm sub} \sim \Delta_{\rm var} \cdot \Delta t / t_{\rm cool}$
+(grey dotted lines), confirming that larger $\Delta_{\rm var}$
+demands proportionally more subcycles.  The Fortran default limit of
+$\code{iter\_max} = 500$ (red dashed line) is exceeded for the
+strongest cooling conditions at $\Delta_{\rm var} \gtrsim 50$.
+
+\begin{figure}
+\centering
+\includegraphics[width=\columnwidth]{fig_cooling_nsub.pdf}
+\caption{Number of N-R subcycles versus $\Delta_{\rm var}$ at
+  $\Delta t = 10\,t_{\rm cool}$.  Grey dotted lines show the
+  theoretical scaling $\Delta_{\rm var} \cdot \Delta t / t_{\rm cool}$.
+  The red dashed line marks the Fortran iteration limit
+  $\code{iter\_max} = 500$.}
+\label{fig:cool_nsub}
+\end{figure}
+
+\subsubsection{Cooling trajectories}
+
+Fig.~\ref{fig:cool_traj} compares the temperature evolution $T(t)$
+for the Strong ($n_{\rm H} = 1$, $T_0 = 10^7\,$K) and ISM
+($n_{\rm H} = 1$, $T_0 = 3\times10^4\,$K) conditions over
+$5\,t_{\rm cool}$.  The RK4 reference is plotted with fine resolution
+(500~steps); the Townsend and N-R solvers use coarse steps
+($\Delta t = t_{\rm cool}$) to reveal the differences.  In the Strong
+case (left), all solvers reach $T_{\rm eq} \approx 4020\,$K within one
+cooling time.  In the ISM case (right), the N-R solver with
+$\Delta_{\rm var} = 4$ (red dashed) systematically overshoots the
+reference trajectory, while the Townsend integrator (blue) tracks the
+RK4 curve closely even with a single step per $t_{\rm cool}$.
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{fig_cooling_trajectory.pdf}
+\caption{Temperature trajectories $T(t/t_{\rm cool})$ for the
+  Strong (left) and ISM (right) conditions.  The RK4 reference (black
+  solid, 500 steps) is compared against the Townsend integrator (blue
+  circles, $\Delta t = t_{\rm cool}$) and the N-R solver with
+  $\Delta_{\rm var} = 4$ (red squares) and $20$ (green triangles).
+  The orange dashed line marks $T_{\rm eq}$.}
+\label{fig:cool_traj}
+\end{figure*}
+
+
+%======================================================================
+\section{Cooling Rates and the Jeans Length}
+\label{sec:cooling}
+%======================================================================
+
+Having described the exact integration scheme, we now analyse the
+cooling rates themselves.  The underlying cooling tables and UV
+background model differ between the standard \ramses\ solver and the
+Grackle equilibrium chemistry library \citep{Smith2017}.  These
+differences propagate into the equilibrium temperature and hence affect
+the Jeans length evaluation and refinement decisions.
+
+
+\subsection{The Standard \ramses\ Cooling Solver}
+\label{sec:ramses_cooling}
+
+The \ramses\ cooling module solves the energy equation
+\begin{equation}
+  \frac{dT_2}{dt} = -\frac{2 X_{\rm H}}{3 k_{\rm B}}\,
+  \frac{\Lambda_{\rm net}(n_{\rm H}, T_2)}{n_{\rm H}},
+  \label{eq:cooling_ode}
+\end{equation}
+where $T_2 \equiv T/\mu$ is the temperature per mean molecular weight
+and $\Lambda_{\rm net}$ is the net volumetric cooling rate
+(cooling $-$ heating) in $\rm erg\,cm^{-3}\,s^{-1}$.
+
+The solver uses a semi-implicit Newton--Raphson iteration.  At each
+sub-step, the temperature is updated as
+\begin{equation}
+  T_2^{(n+1)} = T_2^{(n)}\,
+  \frac{1 + \Lambda'/w_{\rm cool} - \Lambda/(T_2^{(n)}\,w_{\rm cool})}
+       {1 + \Lambda'/w_{\rm cool}},
+  \label{eq:NR_update}
+\end{equation}
+where $\Lambda' \equiv d\Lambda_{\rm net}/dT_2$ and the adaptive step
+control parameter is
+$w_{\rm cool} = \max\bigl(|\Lambda|\,\Delta_{\rm var}/T_2,\;
+w_{\rm max},\;{-\Lambda'\,\Delta_{\rm var}}\bigr)$
+with $\Delta_{\rm var} = 4$.
+
+The cooling rates $\Lambda_{\rm net}$ and their derivatives are
+interpolated from a pre-computed 2D table
+$\Lambda(n_{\rm H}, T_2)$, built at the start of the simulation for the
+current expansion factor $a$.  The table contains separate contributions
+from:
+\begin{itemize}
+  \item H/He collisional cooling (ionisation, recombination,
+    bremsstrahlung, excitation) computed from collisional ionisation
+    equilibrium \citep[CIE;][]{Sutherland1993};
+  \item UV photo-heating from the \citet{Courty2004} background model;
+  \item Compton cooling/heating off the CMB;
+  \item metal cooling from the Cloudy~07 table
+    \citep{Ploeckinger2015}, scaled linearly with metallicity~$Z$.
+\end{itemize}
+
+\subsubsection{Adaptive Sub-stepping (Subcycling)}
+\label{sec:subcycling}
+
+It is sometimes stated that the \ramses\ cooling solver uses subcycling
+to prevent overcooling.  This is correct: rather than applying
+equation~(\ref{eq:NR_update}) once per hydrodynamic time-step~$\Delta t$,
+the solver integrates forward in time through a sequence of adaptive
+sub-steps.  The algorithm maintains a pseudo-time variable
+$t_{\rm sub}$, initialised to zero, and repeats the linearised implicit
+update until $t_{\rm sub}$ reaches the target
+$t_{\rm max} = (2X_{\rm H}/3k_{\rm B})\,n_{\rm H}\,\Delta t$.
+Each sub-step advances $t_{\rm sub}$ by
+$\delta t_{\rm sub} = 1/w_{\rm cool}$, where $w_{\rm cool}$ is the
+adaptive rate defined in equation~(\ref{eq:NR_update}).  Cells that
+reach $t_{\rm max}$ are deactivated; the loop terminates when all cells
+are done or after 500 iterations.  A final linear interpolation between
+the last two sub-steps ensures that the solution lands exactly at
+$t_{\rm max}$:
+\begin{equation}
+  T_2^{\rm final} = T_2^{(n)}\,
+  \frac{t_{\rm max} - t^{(n-1)}}{t^{(n)} - t^{(n-1)}}
+  + T_2^{(n-1)}\,
+  \frac{t^{(n)} - t_{\rm max}}{t^{(n)} - t^{(n-1)}}.
+  \label{eq:subcycle_interp}
+\end{equation}
+
+The key parameter controlling sub-step size is
+$\Delta_{\rm var} = 4$, which limits the relative temperature change per
+sub-step to roughly a factor of~4.  When the cooling rate is large, the
+solver takes many small sub-steps and tracks the temperature evolution
+accurately.  In practice, however, three issues remain:
+
+\begin{enumerate}
+  \item \textbf{First-order accuracy.}  Each sub-step is a linearised
+    implicit Euler update --- first-order in~$\delta t_{\rm sub}$.
+    Higher-order schemes (e.g.\ Runge--Kutta) would reduce the number of
+    sub-steps needed for the same accuracy, but the \ramses\ solver does
+    not employ them.
+  \item \textbf{Permissive step control.}  $\Delta_{\rm var} = 4$ allows
+    the temperature to change by up to a factor of~4 in a single
+    sub-step.  Near the cooling--heating equilibrium, where the
+    temperature needs to settle to $T_{\rm eq}$ with per cent-level
+    accuracy (since the Jeans length scales as $T^{1/2}$), this is too
+    coarse.
+  \item \textbf{Final interpolation error.}  The linear interpolation
+    (equation~\ref{eq:subcycle_interp}) assumes that $T_2$ varies
+    linearly between the last two sub-steps.  If the net cooling rate
+    changes sign in this interval (i.e.\ the cell crosses $T_{\rm eq}$
+    between sub-steps $n{-}1$ and~$n$), the interpolation can land on
+    the wrong side of the equilibrium.
+\end{enumerate}
+
+Thus, while subcycling mitigates the most extreme errors, it
+does not eliminate the systematic biases discussed below.
+
+\subsubsection{Time-Step Dependence and Spurious Temperature
+  Discontinuities}
+\label{sec:overshoot}
+
+The most damaging property of the N-R subcycling solver in an AMR
+context is that the computed final temperature depends on the
+hydrodynamic time-step~$\Delta t$.
+Fig.~\ref{fig:cool_dtindep} demonstrates this directly: for the ISM
+and Dense ISM conditions ($n_{\rm H} = 1$--$10\,{\rm cm}^{-3}$,
+$T_0 = 3 \times 10^4\,$K), the N-R solver with
+$\Delta_{\rm var} = 4$ returns systematically different temperatures
+as $\Delta t / t_{\rm cool}$ varies from $10^{-2}$ to $10^3$.
+The Townsend exact integrator, by contrast, is genuinely
+$\Delta t$-independent across the entire range.
+
+In an AMR simulation with subcycling ($\code{nsubcycle} = 1,\,1,\,2$),
+adjacent cells at different refinement levels receive time-steps
+differing by factors of~2.  Cells at the same physical conditions
+but on different levels therefore receive \emph{different} final
+temperatures from the N-R solver.  This creates artificial temperature
+discontinuities at level boundaries.  Through the Jeans length
+$\lJ \propto T^{1/2}\,\rho^{-1/2}$, these temperature jumps translate
+directly into spurious refinement triggers: a cell on the coarser
+level may remain above the Jeans threshold while its neighbour on
+the finer level falls below it, solely due to the time-step difference.
+
+\textbf{Undercooling bias.}
+As shown in Fig.~\ref{fig:cool_traj}, the N-R solver with
+$\Delta_{\rm var} = 4$ systematically \emph{undercools} in the ISM
+regime --- the computed temperature remains above the RK4 reference
+trajectory.  This is a consequence of the semi-implicit (backward
+Euler) nature of the scheme: the implicit linearisation evaluates the
+cooling rate at the \emph{updated} temperature, which is lower and
+closer to equilibrium, where $|\Lambda_{\rm net}|$ is smaller.  The
+result is a systematic underestimate of the integrated cooling.  The
+bias increases with the time-step size, creating a correlation between
+AMR level and temperature error.
+
+\textbf{Level-dependent temperature gradient.}
+Consider a uniform-density region being photoionisation-heated.  With
+exact cooling, all cells converge to the same $T_{\rm eq}$ regardless
+of their AMR level.  With the N-R solver, cells on coarser levels
+(larger $\Delta t$) systematically undercool more than cells on finer
+levels, creating an artificial temperature gradient across the level
+boundary.  This gradient can trigger the Jeans criterion where no
+physical density enhancement exists, initiating a spurious refinement
+cascade.
+
+\textbf{Cumulative error.}
+Because $T_2$ enters the next hydrodynamic time-step as the updated
+thermal energy, any bias at step $n$ feeds back into the pressure
+and hence the Jeans length at step $n{+}1$.  Over many time-steps,
+the level-dependent temperature bias accumulates, creating persistent
+artefacts in the temperature field that drive sustained spurious
+refinement.
+
+\textbf{Time-step coupling.}
+The maximum sub-step size within \code{solve\_cooling} is determined by
+the cooling time $t_{\rm cool} = (3/2)\,n k_{\rm B} T / |\Lambda_{\rm net}|$.
+When $\Lambda_{\rm net}$ is large, the solver takes many small sub-steps
+and is accurate.  But near equilibrium, $|\Lambda_{\rm net}|$ is small,
+$t_{\rm cool}$ is large, and the solver takes fewer, larger steps ---
+precisely where accuracy matters most for determining the equilibrium
+temperature.
+
+\subsubsection{Limitations of the 2D Table}
+\label{sec:2d_table}
+
+Beyond the numerical integration, the cooling \emph{rates} themselves
+have systematic biases:
+
+\begin{enumerate}
+  \item \textbf{No metallicity axis.}
+    The \ramses\ table is 2D: $(n_{\rm H}, T_2)$.  Metal cooling is
+    stored as a separate 1D function $\Lambda_Z(T)$ at solar
+    metallicity, then scaled as $Z \cdot \Lambda_Z$.  This linear scaling
+    is correct for CIE but neglects the density-dependent ionisation
+    corrections that become important at $n_{\rm H} > 1\,{\rm cm}^{-3}$,
+    where photo-ionisation by the UV background cannot penetrate and the
+    gas is self-shielded.
+
+  \item \textbf{CIE assumption.}
+    The mean molecular weight $\mu$ is computed assuming collisional
+    ionisation equilibrium at each $(n_{\rm H}, T)$ point.  This neglects
+    time-dependent ionisation (important during rapid cooling) and
+    photo-ionisation at low temperatures (important in the diffuse IGM
+    at $T < 10^4\,{\rm K}$), where the UV background maintains a
+    residual ionisation fraction that CIE would predict to be negligible.
+
+  \item \textbf{UV background model.}
+    The default Courty model is a polynomial fit calibrated against
+    Cloudy~07.  More recent UV background models
+    \citep[e.g.][]{HM2012,FG2020} differ significantly at $z > 3$,
+    particularly in the He~{\sc ii} reionisation epoch ($z \sim 3$--$4$)
+    and at the earliest epochs where the UV intensity rises steeply.
+
+  \item \textbf{Temperature variable $T_2 = T/\mu$.}
+    The solver works with $T_2$ rather than $T$.  Since $\mu$ changes
+    across the ionisation transition ($\mu \approx 1.22$ for neutral gas,
+    $\mu \approx 0.59$ for fully ionised), a small change in $T_2$ maps
+    to a factor-of-two change in physical temperature $T$ across the
+    transition.  This amplifies interpolation errors near
+    $T \sim 10^4\,{\rm K}$.
+\end{enumerate}
+
+
+\subsection{Comparison on the Density--Temperature Plane}
+\label{sec:cool_compare}
+
+To quantify the systematic differences, we compare the \ramses\ net
+cooling rate against the Grackle equilibrium cooling library
+\citep{Smith2017}, which uses the \citet{HM2012} UV background
+and includes density-dependent metal cooling with full
+non-LTE ionisation corrections.  We compute
+$\Lambda_{\rm net}(n_{\rm H}, T)$ on a grid of $60 \times 256$ points
+spanning $n_{\rm H} = 10^{-8}$--$10^{4}\,{\rm cm}^{-3}$ and
+$T = 10$--$10^{9}\,{\rm K}$ at $z = 5.1$ (the redshift of the HR5 test
+restart).
+
+\textbf{Low metallicity ($Z = 10^{-3}\,Z_\odot$).}
+Fig.~\ref{fig:cool_diff_lowZ} compares the two models at the
+simulation average metallicity ($\code{z\_ave} = 10^{-3}$).  At this
+low metallicity, the net rate is dominated by H/He processes and UV
+photo-heating.
+
+The lower-left panel shows the log ratio of the cooling rates,
+$\log_{10}(|\Lambda_{\rm RAMSES}|/|\Lambda_{\rm Grackle}|)$.
+Contour lines mark the thermal equilibrium ($\Lambda_{\rm net} = 0$)
+for each model: the yellow solid line for RAMSES and the green dashed
+line for Grackle.  Three features are apparent:
+\begin{enumerate}
+  \item The \emph{equilibrium temperature} differs by up to
+    $\Delta\log T \sim 0.3$--$0.5$ at low densities
+    ($n_{\rm H} \lesssim 10^{-2}\,{\rm cm}^{-3}$), reflecting the
+    different UV backgrounds.  Since $\lJ \propto T^{1/2}$, this
+    translates to a $\sim 40$--$80$\,per\,cent difference in the Jeans
+    length at the same density.
+  \item At intermediate temperatures ($10^4$--$10^5\,{\rm K}$),
+    the RAMSES rate is systematically \emph{stronger} (redder in the
+    ratio panel) by up to an order of magnitude.  This arises because
+    the CIE assumption overpredicts the neutral hydrogen fraction at
+    these temperatures for low-density gas where the UV background
+    maintains significant photo-ionisation.
+  \item At $T > 10^7\,{\rm K}$, both models converge to the
+    bremsstrahlung limit $\Lambda \propto T^{1/2}\,n_{\rm H}^2$ and
+    the ratio approaches unity, as expected.
+\end{enumerate}
+
+The lower-right panel shows the mean molecular weight difference
+$\Delta\mu = \mu_{\rm RAMSES} - \mu_{\rm Grackle}$.  The RAMSES CIE
+$\mu$ is systematically higher than the Grackle non-LTE value at
+$T > 10^5\,{\rm K}$.  At intermediate temperatures
+($T \sim 10^4$--$10^5\,{\rm K}$), the Grackle $\mu$ shows a strong
+\emph{density dependence} due to the UV background maintaining partial
+ionisation at low densities --- a feature entirely absent from the
+RAMSES model, where $\mu(T_2)$ is independent of density.  This
+density-dependent $\mu$ has direct implications for the $T_2 \to T$
+conversion and hence for the Jeans length evaluation.
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{cooling_rate_difference.png}
+\caption{Comparison of the RAMSES and Grackle net cooling rates at
+$z = 5.1$ and $Z = 1.1\times10^{-3}\,Z_\odot$ (the simulation mean
+metallicity).
+\textit{Top left:} RAMSES net cooling rate (Courty UV, Cloudy~07 CIE
+metals).
+\textit{Top right:} Grackle net cooling rate (HM2012 UV, non-LTE
+equilibrium chemistry).
+Red shading indicates net cooling (energy loss); blue indicates net
+heating (energy gain).
+\textit{Bottom left:} Log ratio of the absolute cooling rates,
+$\log_{10}(|\Lambda_{\rm RAMSES}|/|\Lambda_{\rm Grackle}|)$;
+yellow solid curve = RAMSES thermal equilibrium ($\Lambda=0$),
+green dashed = Grackle equilibrium.  Note the divergence of the
+equilibrium contours at $n_{\rm H} < 1\,{\rm cm}^{-3}$.
+\textit{Bottom right:} Mean molecular weight difference
+$\mu_{\rm RAMSES} - \mu_{\rm Grackle}$, showing the density-dependent
+$\mu$ from Grackle's non-LTE treatment.}
+\label{fig:cool_diff_lowZ}
+\end{figure*}
+
+\textbf{Solar metallicity ($Z \approx Z_\odot$).}
+Fig.~\ref{fig:cool_diff_Zsol} shows the same comparison at near-solar
+metallicity, where metal line cooling dominates the temperature range
+$T \sim 10^{4}$--$10^{5.5}\,{\rm K}$.  The differences between the two
+models are significantly amplified:
+\begin{itemize}
+  \item The Grackle table includes density-dependent ionisation
+    corrections for metal species, leading to \emph{up to
+    $\sim 10\times$ stronger cooling} in the
+    $T \sim 10^{4.5}$--$10^{5}\,{\rm K}$ range compared to the
+    CC07 CIE table.  This is precisely the temperature range where
+    infalling gas cools through the virial temperature of
+    $10^{11}$--$10^{12}\,\mathrm{M}_\odot$ haloes.
+  \item The equilibrium temperature contours diverge more strongly,
+    with the RAMSES equilibrium systematically higher at
+    $n_{\rm H} < 10^{-1}\,{\rm cm}^{-3}$.  This implies that the
+    standard \ramses\ solver overestimates the temperature of the
+    warm-hot intergalactic medium (WHIM), reducing the Jeans-based
+    refinement trigger and potentially missing structure in filaments.
+  \item The UV suppression factor for metal cooling differs: the
+    Courty model applies a redshift-dependent attenuation
+    $f_{\rm UV}(n_{\rm H}, z)$ that damps metal cooling more strongly
+    at low densities than the Grackle self-shielding prescription.
+\end{itemize}
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{cooling_rate_difference_Zsolar.png}
+\caption{Same as Fig.~\ref{fig:cool_diff_lowZ} but at solar
+metallicity ($Z = 0.84\,Z_\odot$).  Metal cooling dominates the net
+rate at $T \sim 10^{4}$--$10^{5.5}\,{\rm K}$, amplifying the
+model differences.  Note the larger separation of the equilibrium
+contours (bottom-left) and the stronger $\Delta\mu$ pattern
+(bottom-right) compared to the low-metallicity case.}
+\label{fig:cool_diff_Zsol}
+\end{figure*}
+
+
+\subsection{Implications for the Jeans Criterion}
+\label{sec:cool_jeans}
+
+The combined effect of the cooling rate differences
+(Figs~\ref{fig:cool_diff_lowZ}--\ref{fig:cool_diff_Zsol}), the
+integration scheme, and the redshift evolution of the UV background
+impacts the Jeans refinement criterion through four channels:
+
+\textbf{1. Equilibrium temperature.}
+The Jeans length at thermal equilibrium is
+$\lJ^{\rm eq} \propto (T_{\rm eq}/\rho)^{1/2}$.  Since
+$T_{\rm eq}^{\rm RAMSES} \ne T_{\rm eq}^{\rm Grackle}$ (bottom-left
+panels), the two solvers will flag different cells.  At low densities,
+the RAMSES equilibrium is systematically \emph{higher}
+($T_{\rm eq} \sim 2$--$3\times$ warmer), yielding a larger Jeans length
+and less refinement.  This means the standard solver may
+\emph{underestimate} the refinement needed in filaments and the
+circumgalactic medium.
+
+\textbf{2. Cooling overshoot near $T_{\rm eq}$.}
+The N-R solver's tendency to overshoot $T_{\rm eq}$
+(Section~\ref{sec:overshoot}) creates transient temperature errors that
+affect the \emph{instantaneous} Jeans length even if the time-averaged
+temperature is correct.  A cell that overshoots to $T < T_{\rm eq}$
+will have a transiently small $\lJ$, triggering refinement that may
+not be needed.  Conversely, a cell that oscillates above $T_{\rm eq}$
+will have a transiently large $\lJ$, suppressing refinement that
+\emph{is} needed.  The exact integrator eliminates this noise entirely.
+
+\textbf{3. Mean molecular weight.}
+The $T_2 = T/\mu$ representation amplifies errors in $\mu$.  With the
+RAMSES CIE model, $\mu$ is a function of $T_2$ alone (density-independent).
+The Grackle non-LTE $\mu$ depends on both $n_{\rm H}$ and $T$, with
+$|\Delta\mu| \sim 0.3$--$0.6$ in the transition zone
+($T \sim 10^4$--$10^5\,{\rm K}$; bottom-right panels).  Since $T =
+T_2\,\mu$, a 50\,per\,cent error in $\mu$ produces a 50\,per\,cent
+error in $T$ and hence a $\sim 22$\,per\,cent error in $\lJ$,
+comparable to the factor-of-two ratio that separates adjacent
+refinement levels.
+
+\textbf{4. Redshift evolution of $T_{\rm eq}$.}
+The thermal equilibrium temperature evolves with redshift as the UV
+background strengthens (towards $z \sim 2$) and then weakens (towards
+$z = 0$).  A fixed-$z$ Grackle table ignores this evolution, producing
+a systematic offset in $T_{\rm eq}$ that grows with $|z - z_{\rm table}|$.
+At the epoch of maximum UV background ($z \sim 2$--$3$), this offset
+can reach factors of 2--3 in $T_{\rm eq}$ if the table was computed at
+$z = 5$, corresponding to a $\sim 40$--$70$\,per\,cent error in $\lJ$.
+The multi-z interpolation (Section~\ref{sec:multi_z}) eliminates this
+systematic bias, ensuring that $T_{\rm eq}$ tracks the correct UV
+background at every epoch.
+
+Table~\ref{tab:cool_summary} summarises the systematic differences
+and their impact on the Jeans length.
+
+\begin{table*}
+\centering
+\caption{Systematic differences between the \ramses\ and
+Grackle/Townsend cooling implementations and their impact on the
+Jeans length.}
+\label{tab:cool_summary}
+\begin{tabular}{llll}
+\toprule
+Component & \ramses & Grackle/Townsend & $\lJ$ impact \\
+\midrule
+Integration & N-R implicit (sub-stepping) &
+  Exact $Y$-function (single step) & Removes overshoot noise \\
+UV background & Courty (Cloudy 07) &
+  \citet{HM2012} (Cloudy 13) & $T_{\rm eq}$ shift $\to$ 40--80\,per\,cent \\
+Metal cooling & CC07 CIE, linear $Z$ scaling &
+  3D non-LTE, density-dep.\ $Z$ & Up to $10\times$ at $10^{4.5}$\,K \\
+$\mu$ model & CIE, density-independent &
+  Non-LTE, $\mu(n_{\rm H}, Z, T)$ & $|\Delta\mu| \sim 0.3$--$0.6$ \\
+Table dimension & 2D: $(n_{\rm H}, T_2)$ &
+  3D: $(n_{\rm H}, Z, T)$ & Metallicity resolution \\
+Redshift & Rebuilt per step (\code{set\_table}) &
+  Multi-z interpolation (10 snapshots) & Tracks $T_{\rm eq}(z)$ correctly \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+
+%======================================================================
+
+\section{The Starburst Problem}
+\label{sec:starburst}
+%======================================================================
+
+The holdback mechanism (Section~\ref{sec:amr_refine}) blocks
+\emph{all} refinement criteria at levels $\ell \ge \ell_{\rm hb}$,
+including the Jeans criterion.  This creates two related problems:
+
+\textbf{Artificial fragmentation.}
+The Jeans length criterion $\mathcal{J}$ differs fundamentally from
+the other refinement triggers: it is a \emph{numerical stability}
+requirement \citep{Truelove1997}, not merely a resolution preference.
+Violating the Jeans condition leads to artificial fragmentation ---
+a qualitatively wrong result --- regardless of epoch.  Yet in the
+standard \ramses\ logic (equation~\ref{eq:refine_flag}), the
+cosmological holdback $\mathcal{H}$ blocks $\mathcal{J}$ uniformly
+with all other criteria.  At high redshift, dense self-gravitating
+regions may therefore be held at insufficient resolution, producing
+spurious fragmentation that propagates into lower-redshift structure.
+
+\textbf{Abrupt SFR transition.}
+When the holdback releases level $\ell$ (i.e.\ $\mathcal{H}(\ell)$
+transitions from true to false), all accumulated criteria fire
+simultaneously.  Many cells that have been gravitationally collapsing
+during the holdback period now suddenly satisfy the refinement
+condition, leading to a burst of new cells and an abrupt spike in
+the star formation rate.
+
+
+%======================================================================
+\section{Jeans Bypass: Design and Implementation}
+\label{sec:bypass}
+%======================================================================
+
+\subsection{Modified Refinement Logic}
+
+The key observation is that the Jeans length criterion is
+\emph{cell-local}: it depends only on the density and temperature of the
+cell itself (\code{uold}), with no neighbour information required.  This
+allows a lightweight evaluation even when the full refinement machinery
+(which requires neighbour gathering for $\mathcal{D}$, $\mathcal{P}$,
+$\mathcal{U}$) is skipped by the holdback.
+
+With \code{jeans\_bypass\_holdback=.true.}, the refinement logic becomes
+\begin{equation}
+\mathcal{R}' = \Bigl[
+  \lnot\,\mathcal{H} \;\land\; \mathcal{G} \;\land\;
+  \bigl(\mathcal{M} \lor \mathcal{S} \lor \mathcal{D}
+        \lor \mathcal{P} \lor \mathcal{U} \lor \mathcal{J}\bigr)
+\Bigr]
+\;\lor\;
+\Bigl[ \mathcal{H} \;\land\; \mathcal{J} \;\land\;
+  (\ell < \ell_{\rm hb} + n_{\rm bypass}) \Bigr],
+\label{eq:refine_bypass}
+\end{equation}
+where $n_{\rm bypass} \equiv$ \code{n\_jeans\_bypass\_levels}
+(default 1).  The geometry mask $\mathcal{G}$ still applies through the
+non-holdback branch, preserving zoom-in spatial restrictions.  Only the
+temporal holdback $\mathcal{H}$ is bypassed for $\mathcal{J}$, and only
+within a limited number of levels.
+
+This modification is analogous to the existing treatment of sink
+particles: $\mathcal{S}$ is already evaluated inside the
+holdback-protected block, but unlike $\mathcal{J}$ it only triggers in
+cells that already host a sink.  Extending the same exemption to
+$\mathcal{J}$ ensures numerical integrity for gas that is
+\emph{about to} form a sink.
+
+
+\subsection{Level Limitation: Preventing Cascades}
+\label{sec:cascade}
+
+Without a level limit ($n_{\rm bypass}\to\infty$), the Jeans bypass
+creates a catastrophic cascade.  When a cell at the holdback level
+$\ell_{\rm hb}$ is flagged by the Jeans criterion, child cells are
+created at level $\ell_{\rm hb}+1$.  Since level $\ell_{\rm hb}+1$ is
+also in the holdback zone, the bypass applies again, flagging cells at
+$\ell_{\rm hb}+2$, and so on until $\ell_{\rm max}$.  This rapidly
+exhausts available memory.
+
+The cascade occurs because the Jeans length in radiatively cooling gas
+(below the star-formation density threshold) shrinks without bound as
+the temperature drops.  There is no physical mechanism to halt the
+Jeans criterion from triggering at every successive level --- only the
+polytropic temperature floor (Section~\ref{sec:polytropic}) or a hard
+level limit can stop it.
+
+Table~\ref{tab:cascade} shows the progression observed in a test run
+without level limit.
+
+\begin{table}
+\centering
+\caption{Cascade refinement without level limit ($a=0.164$,
+$\ell_{\rm hb}=14$, $\ell_{\rm max}=17$).  All levels $\ge 14$ are
+in the holdback zone.}
+\label{tab:cascade}
+\begin{tabular}{cccccl}
+\toprule
+Level & $\dx/\dx_{\rm min}$ & Holdback & Bypass &
+$\mathcal{J}$ fires & Result \\
+\midrule
+$\le 12$ & $\ge 32$  & No  & ---    & Yes (normal) & Normal \\
+13       & 16        & No  & ---    & Yes (normal) & Normal \\
+14       & 8         & Yes & Active & Yes          & $\to$ lv.~15 created \\
+15       & 4         & Yes & Active & Yes          & $\to$ lv.~16 created \\
+16       & 2         & Yes & Active & Yes          & $\to$ lv.~17 created \\
+17       & 1         & $\ell_{\rm max}$ & ---  & ---  & OOM crash \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The memory footprint grew from 81\,per\,cent to 88.5\,per\,cent in a
+single coarse step before crashing.  The fine-step time-step also
+decreased by $8\times$ due to subcycling at levels 15--17.
+
+With $n_{\rm bypass}=1$, only level $\ell_{\rm hb}=14$ is bypassed,
+creating cells at level 15 but no further.  This provides a controlled
+pre-refinement before the holdback releases.
+
+
+%======================================================================
+\section{Role of the Polytropic Temperature Floor}
+\label{sec:polytropic}
+%======================================================================
+
+\subsection{Jeans Length in the Polytropic Regime}
+
+In \ramses, the star-formation module enforces a polytropic equation
+of state above the density threshold $\nstar$:
+\begin{equation}
+  T(n) = \Tstar\,\Bigl(\frac{n}{\nstar}\Bigr)^{\gstar - 1},
+  \qquad n \ge \nstar,
+  \label{eq:polytropic}
+\end{equation}
+with default parameters $\Tstar = 750\,{\rm K}$,
+$\nstar = 0.1\,{\rm cm}^{-3}$, $\gstar = 5/3$.  This floor is
+applied in the cooling routine and is already reflected in \code{uold},
+so the Jeans length computation in \code{jeans\_length\_refine()}
+automatically includes the polytropic stabilisation.
+
+Substituting equation~(\ref{eq:polytropic}) into
+equation~(\ref{eq:jeans_crit}):
+\begin{equation}
+  \lJ \propto \sqrt{\frac{T}{\rho}} \propto
+  \sqrt{\rho^{\gstar-1}/\rho} = \rho^{(\gstar-2)/2}.
+  \label{eq:jeans_poly}
+\end{equation}
+The behaviour of $\lJ$ in the polytropic regime depends critically
+on the value of $\gstar$:
+
+\begin{itemize}
+  \item $\gstar < 2$: $\lJ$ decreases with density.  For the
+    standard value $\gstar = 5/3$, $\lJ \propto \rho^{-1/6}$ ---
+    the decrease is slow, but unbounded.  Given enough levels, a
+    cascade can still develop.
+  \item $\gstar = 2$: $\lJ \propto \rho^{0} = \mathrm{const}$.
+    The Jeans length is \emph{independent of density} in the
+    polytropic regime, so refinement converges at a fixed level
+    regardless of how much the gas compresses.  This is the
+    \emph{critical polytropic index} for Jeans stability.
+  \item $\gstar > 2$: $\lJ$ increases with density, providing an
+    even stronger self-regulation.
+\end{itemize}
+
+Table~\ref{tab:gstar} quantifies the temperature floor at
+the star-formation threshold $n = \code{del\_star}\times\nstar
+= 55\,\nstar$ for different values of $\gstar$, keeping
+$\Tstar = 750\,$K.
+
+\begin{table}
+\centering
+\caption{Polytropic temperature floor and Jeans length behaviour
+for different values of $\gstar$, evaluated at the star-formation
+threshold $n = 55\,\nstar$.}
+\label{tab:gstar}
+\begin{tabular}{lccc}
+\toprule
+$\gstar$ & $T_{\rm floor}$ (K) & $\lJ$ scaling & Cascade safe? \\
+\midrule
+$5/3$  & $\sim$10\,900 & $\rho^{-1/6}$ (decreasing) & No \\
+$2$    & $\sim$41\,300 & const & Yes \\
+$7/3$  & $\sim$157\,000 & $\rho^{+1/6}$ (increasing) & Yes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The $\gstar = 2$ case is appealing because it eliminates the
+cascade problem entirely without any additional mechanisms (no
+holdback, no \code{d\_jeans\_thre}, no level limits).  However,
+it comes at a significant physical cost: the temperature floor
+at the star-formation threshold rises from $\sim$10\,900\,K to
+$\sim$41\,300\,K --- nearly a factor of 4.  This dramatically
+increases the pressure support in star-forming gas, suppressing
+the peak densities and reducing the star formation rate.  Since
+$\dot{\rho}_* \propto \rho / t_{\rm ff} \propto \rho^{3/2}$, even
+modest changes in the density PDF propagate into order-of-magnitude
+SFR differences.  Adopting $\gstar = 2$ therefore requires a full
+recalibration of the star-formation parameters ($\epsilon_*$,
+$\code{del\_star}$, $\Tstar$, $\nstar$) against observational
+constraints, which is non-trivial for production simulations that
+have already been calibrated with $\gstar = 5/3$.
+
+In practice, the standard choice $\gstar = 5/3$ combined with
+\code{d\_jeans\_thre}~$\approx \nstar$ provides an effective
+compromise: the Jeans criterion is restricted to the polytropic
+regime where $\lJ$ varies slowly ($\propto \rho^{-1/6}$), limiting
+the cascade to 1--2 extra levels, while preserving the calibrated
+star-formation physics.
+
+In contrast, for gas below $\nstar$ (no polytropic floor), radiative
+cooling can drive $T$ to very low values while $\rho$ remains moderate.
+This yields $\lJ \ll \dx_\ell$ at many levels, causing the cascade.
+
+\subsection{Self-regulation via \code{d\_jeans\_thre}}
+
+The density threshold parameter \code{d\_jeans\_thre} (in units of
+$n_{\rm H}\,[{\rm cm}^{-3}]$) restricts the Jeans criterion to cells
+above a given density:
+\begin{equation}
+  \mathcal{J}(\text{cell}) =
+  \begin{cases}
+    N_J\,\dx_\ell \ge \lJ & \text{if } n \ge
+    \code{d\_jeans\_thre}, \\
+    \text{false} & \text{otherwise}.
+  \end{cases}
+\end{equation}
+Setting $\code{d\_jeans\_thre} \approx \nstar$ restricts the Jeans
+criterion to the polytropic regime.  The cascade then self-limits
+through the following mechanism:
+
+\begin{enumerate}
+  \item At level $\ell_{\rm hb}$: only cells with $n \ge \nstar$ are
+    checked.  The polytropic floor guarantees $T \ge \Tstar$, so $\lJ$
+    is relatively large.
+  \item If $N_J\,\dx_{\ell_{\rm hb}} > \lJ$, the cell is flagged and
+    children at $\ell_{\rm hb}+1$ are created.
+  \item At level $\ell_{\rm hb}+1$: $\dx$ is halved, density is
+    approximately unchanged, $\lJ$ is approximately unchanged.
+  \item $N_J\,\dx_{\ell_{\rm hb}+1} = N_J\,\dx_{\ell_{\rm hb}}/2
+    < \lJ$ $\Rightarrow$ Jeans criterion is \emph{satisfied}
+    $\Rightarrow$ no further flagging $\Rightarrow$ cascade stops
+    naturally.
+\end{enumerate}
+
+This provides a \emph{physics-based} self-regulation, complementary to
+the \emph{hard limit} imposed by \code{n\_jeans\_bypass\_levels}.
+
+\begin{table}
+\centering
+\caption{Two complementary mechanisms for preventing the bypass
+cascade.}
+\label{tab:regulators}
+\begin{tabular}{lll}
+\toprule
+Mechanism & Type & Behaviour \\
+\midrule
+\code{n\_jeans\_bypass\_levels} & Hard limit &
+  Caps extra levels regardless of physics \\
+\code{d\_jeans\_thre} $\approx \nstar$ & Physics-based &
+  Polytropic floor limits $\lJ$ decrease \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+When \code{d\_jeans\_thre}$\,=0$ (default), \emph{all} cells are
+checked, including low-density gas where cooling produces arbitrarily
+small $\lJ$.  This is the root cause of the unlimited cascade observed
+in Section~\ref{sec:cascade}.
+
+
+%======================================================================
+\section{Implementation Details}
+\label{sec:implementation}
+%======================================================================
+
+\subsection{Code Structure}
+
+The implementation modifies two source files (plus parameter declaration
+and namelist reading).
+
+\textbf{\code{flag\_utils.kjhan.f90} --- \code{userflag\_fine()}.}
+The holdback early-return is modified from a simple \code{return} to a
+conditional block:
+
+\begin{lstlisting}
+if(prevent_refine .and. q_refine_holdback) then
+   if(jeans_bypass_holdback .and. hydro &
+      .and. n_jeans_bypass_levels > 0) then
+      ! Find the first holdback level
+      dx_min = (0.5D0**nlevelmax)*scale
+      holdback_threshold = &
+        (4d0**(1d0/ndim))*(dx_min/aexp)
+      holdback_first = nlevelmax + 1
+      do jlevel = nlevelmax_part &
+         + nlevel_collapse+1, nlevelmax
+         dx_test = (0.5d0**jlevel)*scale
+         if(dx_test < holdback_threshold) then
+            holdback_first = jlevel
+            exit
+         endif
+      end do
+      ! Only bypass within allowed range
+      if(ilevel < holdback_first &
+         + n_jeans_bypass_levels) then
+         call jeans_only_flag(ilevel)
+      endif
+   endif
+   return
+endif
+\end{lstlisting}
+
+\textbf{\code{hydro\_flag.kjhan.f90} --- \code{jeans\_only\_flag()}.}
+A new lightweight subroutine that:
+\begin{enumerate}
+  \item Loops over active grids with OpenMP parallelism.
+  \item Computes cell indices without neighbour gathering.
+  \item Calls the existing \code{jeans\_length\_refine()} subroutine
+    (no code duplication).
+  \item Sets \code{flag1} for flagged cells and updates \code{nflag}.
+\end{enumerate}
+
+This is possible because \code{jeans\_length\_refine()} only accesses
+cell-local data (\code{uold(ind\_cell,...)}), unlike the gradient-based
+criteria $\mathcal{D}$, $\mathcal{P}$, $\mathcal{U}$.
+
+\subsection{Safety Properties}
+
+\begin{itemize}
+  \item \textbf{Default off}: With
+    \code{jeans\_bypass\_holdback=.false.} (default), the new code path
+    is never entered.  Bit-identical to the unmodified code.
+  \item \textbf{No neighbour access}: \code{jeans\_only\_flag()} is
+    safe to call at any point in the refinement cycle.
+  \item \textbf{OMP safety}: \code{flag1} writes are grid-partitioned;
+    \code{nflag} uses reduction.
+  \item \textbf{Hard level limit}: \code{n\_jeans\_bypass\_levels}
+    provides a fail-safe even if \code{d\_jeans\_thre} is misconfigured.
+\end{itemize}
+
+
+\subsection{Summary of Parameters}
+\label{sec:params}
+
+Table~\ref{tab:refine_params} lists all refinement-related
+namelist parameters, including the new bypass parameters.
+
+\begin{table*}
+\centering
+\caption{AMR refinement parameters in the \code{\&AMR\_PARAMS} and
+\code{\&REFINE\_PARAMS} namelists.  New parameters are marked with
+$\star$.}
+\label{tab:refine_params}
+\begin{tabular}{lll}
+\toprule
+Parameter & Default & Role \\
+\midrule
+\code{m\_refine}      & 8.0  & Lagrangian mass threshold (per level) \\
+\code{sink\_refine}   & F    & Force max level around sinks \\
+\code{err\_grad\_d}   & $-1$ & Density gradient threshold \\
+\code{err\_grad\_p}   & $-1$ & Pressure gradient threshold \\
+\code{err\_grad\_u}   & $-1$ & Velocity gradient threshold \\
+\code{jeans\_refine}  & $-1$ & Jeans length in cells (per level) \\
+\code{d\_jeans\_thre} & 0    & Density threshold for Jeans
+  ($n_{\rm H}\,$cm$^{-3}$) \\
+\code{r\_refine}      & $-1$ & Geometry region diameter (per level) \\
+\code{a\_refine}      & 1.0  & Ellipticity $Y/X$ \\
+\code{b\_refine}      & 1.0  & Ellipticity $Z/X$ \\
+\code{exp\_refine}    & 2.0  & Norm exponent \\
+\code{x/y/z\_refine}  & 0.5  & Region centre \\
+\code{nexpand}        & 1    & Buffer zone width (per level) \\
+\code{q\_refine\_holdback} & F & Cosmological holdback \\
+$\star$ \code{jeans\_bypass\_holdback} & F &
+  Enable Jeans bypass of holdback \\
+$\star$ \code{n\_jeans\_bypass\_levels} & 1 &
+  Max extra levels beyond $\ell_{\rm hb}$ \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+The recommended configuration for cosmological runs with star
+formation is:
+\begin{lstlisting}
+&REFINE_PARAMS
+m_refine          = 9*8.,
+jeans_refine      = 9*4.,
+jeans_bypass_holdback  = .true.
+n_jeans_bypass_levels  = 1
+d_jeans_thre      = 0.1     ! = n_star
+q_refine_holdback = .true.
+/
+\end{lstlisting}
+
+
+%======================================================================
+\section{Test Results}
+\label{sec:tests}
+%======================================================================
+
+All tests use the HR5 medium-box setup: $\ell_{\rm min}=9$,
+$\ell_{\rm max}=17$, 12 MPI ranks, OMP=5, restarting from output 5
+($a=0.164$, $z\approx 5.1$, nstep\_coarse=241).
+
+\subsection{Bit-identical Verification}
+
+With \code{jeans\_bypass\_holdback=.false.} (default) and no
+\code{jeans\_refine}, the new binary produces results identical to
+the reference run: econs=$6.13\times10^{-4}$ at step 242,
+econs=$6.71\times10^{-4}$ at step 243.
+
+\subsection{Unlimited Bypass}
+
+With \code{jeans\_refine=9*4.},
+\code{jeans\_bypass\_holdback=.true.}, \code{d\_jeans\_thre=0}, and
+no level limit: cascade refinement from level 14 through 17 within a
+single coarse step.  Memory grew from 81\,per\,cent to
+88.5\,per\,cent before OOM crash.
+Fine-step time-step decreased by $8\times$ due to subcycling.
+
+\subsection{Limited Bypass ($n_{\rm bypass}=1$)}
+
+With \code{n\_jeans\_bypass\_levels=1}: only level 14 is bypassed,
+cells at level 15 may be created but no further cascade.
+
+\subsection{Future: $\code{d\_jeans\_thre}=\nstar$}
+
+A test with \code{d\_jeans\_thre=0.1} will verify the physics-based
+self-regulation, potentially allowing $n_{\rm bypass} > 1$ without
+cascade, since only gas in the polytropic regime would trigger the
+Jeans criterion.
+
+
+%======================================================================
+\section{Discussion and Future Work}
+\label{sec:discussion}
+%======================================================================
+
+\subsection{Physical Motivation}
+
+The holdback mechanism was designed to prevent over-refinement from the
+mass criterion at early times.  However, it inadvertently blocks the
+Jeans criterion, which has a different physical motivation: resolving
+the Jeans length prevents artificial fragmentation and ensures
+numerically converged star formation \citep{Truelove1997, Federrath2011}.
+
+By allowing the Jeans criterion to operate ahead of the holdback
+release, we expect:
+\begin{itemize}
+  \item Dense gas that will form stars is pre-refined before the
+    holdback releases.
+  \item When the holdback releases, the transition is smoother because
+    the densest regions are already at the appropriate resolution.
+  \item The SFR curve shows a gradual onset rather than an abrupt step.
+\end{itemize}
+
+\subsection{Interplay of the Three Parameters}
+
+The bypass is controlled by three parameters that form a layered
+defence:
+
+\textbf{Layer 1: \code{jeans\_bypass\_holdback} (on/off).}
+Master switch.  When off (default), the system is identical to
+standard \ramses.
+
+\textbf{Layer 2: \code{d\_jeans\_thre} (physics-based regulation).}
+Restricts the Jeans check to dense gas where the polytropic floor
+operates.  In this regime, $\lJ \propto \rho^{(\gstar-2)/2}$ varies
+slowly (for $\gstar = 5/3$, $\propto \rho^{-1/6}$), and 1--2 extra
+refinement levels suffice to resolve it.  As shown in
+Section~\ref{sec:polytropic}, adopting $\gstar \ge 2$ would eliminate
+the cascade entirely, but at the cost of a significantly stiffer
+pressure floor that requires SFR recalibration
+(Table~\ref{tab:gstar}).  Provides self-consistent, physics-driven
+cascade termination.
+
+\textbf{Layer 3: \code{n\_jeans\_bypass\_levels} (hard safety limit).}
+Absolute cap on the number of extra levels.  Prevents OOM regardless
+of physics configuration.  Essential when
+\code{d\_jeans\_thre=0} (all cells checked).
+
+
+\subsection{Problems with Additional Temperature and Pressure Floors}
+\label{sec:pfloor}
+
+A common approach to enforcing the Jeans criterion in cosmological
+simulations is to introduce an \emph{additional} temperature or
+pressure floor beyond the star-formation polytropic floor
+(equation~\ref{eq:polytropic}).  Several major simulation projects
+adopt a resolution-dependent pressure floor of the form
+\begin{equation}
+  P_{\rm floor} = \frac{G}{\pi\,\gamma}\,
+  N_J^2\,\rho\,(\dx_\ell)^2,
+  \label{eq:pfloor}
+\end{equation}
+which ensures $\lJ \ge N_J\,\dx_\ell$ at all times
+\citep[e.g.][]{Schaye2015, Hopkins2018}.  Equivalently, this
+corresponds to a density-dependent temperature floor
+$T_{\rm floor} \propto \rho\,(\dx_\ell)^2$.  While this
+\emph{guarantees} that the Jeans criterion is never violated, it
+introduces several systematic problems:
+
+\textbf{(i) Artificial suppression of fragmentation.}
+The pressure floor prevents gas from cooling below $T_{\rm floor}$,
+even when the physical equilibrium temperature $T_{\rm eq}$ is much
+lower.  In the density range $\nstar < n < n_{\rm floor}$ (where
+$n_{\rm floor}$ is the density at which $T_{\rm floor}$ exceeds the
+polytropic floor), the gas is held at an artificially high
+temperature.  This suppresses the thermal instability that drives
+the formation of the cold, dense phase of the ISM
+\citep{Sutherland1993, Wiersma2009}, potentially preventing the
+formation of molecular clouds and reducing the star formation rate.
+
+\textbf{(ii) Resolution-dependent thermodynamics.}
+Since $P_{\rm floor} \propto (\dx_\ell)^2$, the effective equation
+of state of the gas depends on the grid resolution.  At higher
+resolution ($\ell_{\rm max}$ increased), $\dx$ decreases and the floor
+drops, allowing gas to cool further and fragment into smaller
+structures.  The resulting star formation rate, stellar mass function,
+and galaxy morphologies are therefore resolution-dependent --- not
+converging to a physical answer as resolution increases, but rather
+revealing new fragmentation at each resolution level.
+
+\textbf{(iii) Conflict with the polytropic floor.}
+The star-formation polytropic floor (equation~\ref{eq:polytropic}) is
+designed to model the unresolved physics of the multiphase ISM above
+$\nstar$: it represents the effective equation of state of a turbulent,
+star-forming medium \citep{Schaye2015}.  An additional Jeans pressure
+floor that is active \emph{below} $\nstar$ creates a discontinuity in
+the effective equation of state at $n = \nstar$ if the two floors do
+not match.  More fundamentally, the Jeans floor operates on
+\emph{numerical} grounds (preventing artificial fragmentation) while
+the polytropic floor operates on \emph{physical} grounds (modelling
+the unresolved ISM), and conflating the two obscures the distinction
+between numerical and physical effects.
+
+\textbf{(iv) Masking of cooling errors.}
+The pressure floor removes the consequences of cooling inaccuracies
+(Section~\ref{sec:overshoot}) by overriding the computed temperature
+whenever it falls below $T_{\rm floor}$.  While this prevents the
+most extreme manifestation of cooling artefacts (spurious
+fragmentation), it also prevents the diagnosis of the underlying
+problem.  The $\Delta t$-dependent temperature biases of the N-R
+solver create artificial temperature discontinuities at AMR level
+boundaries that the floor cannot address, since the erroneous
+temperatures typically remain above $T_{\rm floor}$.  Over many
+time-steps, these hidden biases accumulate and affect the refinement
+pattern and the large-scale thermodynamic state.
+
+\textbf{(v) Incompatibility with turbulent Jeans analysis.}
+If the Jeans criterion is to be extended to include turbulent pressure
+support (equation~\ref{eq:jeans_turb}), the floor must also be
+modified to account for $\sigma_{\rm turb}$.  But the turbulent
+velocity dispersion varies in space and time, making a simple analytic
+floor impossible.  The approach advocated in this paper --- \emph{resolving}
+the Jeans length through AMR rather than \emph{imposing} it through a
+floor --- is naturally compatible with a turbulence-dependent criterion,
+since the refinement condition (equation~\ref{eq:jeans_crit}) can be
+straightforwardly generalised to use $c_{\rm eff}^2 = c_s^2 +
+\sigma_{\rm turb}^2$ without modifying any thermodynamic floor.
+
+In summary, while a pressure floor provides a brute-force guarantee
+that the Jeans criterion is satisfied, it does so at the cost of
+altering the thermodynamic state of the gas.  Our approach ---
+combining accurate cooling (Sections~\ref{sec:exact_cooling}--\ref{sec:cooling}) with
+Jeans-aware refinement (Section~\ref{sec:bypass}) --- achieves the
+same numerical stability without modifying the gas physics.
+
+
+\subsection{Turbulence and the Effective Jeans Length}
+\label{sec:turbulence}
+
+The analysis presented in this paper treats the Jeans length as a
+purely thermal quantity (equation~\ref{eq:jeans_crit}).  In reality,
+turbulent motions in the ISM provide additional pressure support that
+modifies the effective stability criterion.  Following
+\citet{Chandrasekhar1951} and \citet{Bonazzola1987}, the turbulent
+Jeans length is
+\begin{equation}
+  \lJ^{\rm turb} =
+  \sqrt{\frac{\pi\,(c_s^2 + \sigma_{\rm turb}^2)}{G\,\rho}},
+  \label{eq:jeans_turb_disc}
+\end{equation}
+where $\sigma_{\rm turb}$ is the turbulent velocity dispersion on the
+grid scale.  In the limit $\sigma_{\rm turb} \gg c_s$, the turbulent
+Jeans length can exceed the thermal Jeans length by an order of
+magnitude, fundamentally changing the refinement pattern.
+
+Subgrid-scale turbulence models \citep{Schmidt2006, Schmidt2011}
+evolve a turbulent energy density $e_{\rm turb}$ alongside the
+hydrodynamic variables, providing a local estimate of $\sigma_{\rm
+turb} = (2 e_{\rm turb}/\rho)^{1/2}$.  \citet{Rennehan2021} applied
+this approach to cosmological simulations, showing that SGS turbulence
+can suppress artificial fragmentation in the circumgalactic medium.
+\citet{Semenov2016} demonstrated that a turbulence-regulated star
+formation prescription produces more realistic star formation
+histories than a simple density-threshold model.
+
+In galactic discs, turbulence is driven by a combination of supernova
+feedback, gravitational instabilities, magnetorotational instability,
+and large-scale shear \citep{Robertson2008, Kim2017, Hopkins2018}.
+The relative importance of these drivers varies with environment:
+supernova feedback dominates in star-forming regions, while
+gravitational infall and accretion shocks drive turbulence in the CGM
+and IGM \citep{Iapichino2011}.
+
+Incorporating equation~(\ref{eq:jeans_turb_disc}) into the AMR
+refinement criterion requires:
+\begin{enumerate}
+  \item A local estimator of $\sigma_{\rm turb}$ --- either from
+    resolved velocity gradients \citep{Federrath2012} or from a
+    dedicated SGS model \citep{Schmidt2006, Rennehan2021}.
+  \item Modification of \code{jeans\_length\_refine()} to use the
+    effective sound speed $c_{\rm eff}^2 = c_s^2 + \sigma_{\rm turb}^2$
+    in place of $c_s^2$.
+  \item Re-evaluation of the cascade analysis
+    (Section~\ref{sec:cascade}), since turbulent pressure
+    \emph{increases} $\lJ^{\rm turb}$ and may naturally prevent the
+    cascade without a hard level limit.
+\end{enumerate}
+This turbulence-dependent Jeans criterion is a natural extension of
+the framework presented here, and will be the subject of a future
+paper.
+
+
+\subsection{Can Turbulence Replace the Holdback?}
+\label{sec:turb_vs_holdback}
+
+A natural question is whether turbulent pressure support alone can
+prevent the refinement cascades that the holdback mechanism was
+designed to suppress, thereby rendering the holdback unnecessary.
+We present both a quantitative scaling analysis and a direct
+numerical test.
+
+\textbf{Scaling analysis.}
+Including turbulence, the Jeans length increases by a factor
+$\lJ^{\rm turb}/\lJ = (1 + \mathcal{M}_{\rm turb}^2)^{1/2}$,
+where $\mathcal{M}_{\rm turb} = \sigma_{\rm turb}/c_s$ is the
+turbulent Mach number.  In terms of refinement levels, turbulence
+prevents the cascade from extending by
+\begin{equation}
+  \Delta\ell_{\rm turb} = \tfrac{1}{2}\log_2(1 + \mathcal{M}_{\rm turb}^2)
+  \label{eq:turb_levels}
+\end{equation}
+levels.  Table~\ref{tab:turb_holdback} compares this with the
+holdback, which prevents approximately
+$\Delta\ell_{\rm hb} \approx \log_2(4^{1/3}/a_{\rm exp})$ levels at
+a given expansion factor.
+
+\begin{table}
+\centering
+\caption{Comparison of cascade prevention by turbulence and holdback.
+The turbulent Mach numbers are representative values for each
+environment.}
+\label{tab:turb_holdback}
+\begin{tabular}{lcccc}
+\toprule
+Environment & $\mathcal{M}_{\rm turb}$ & $\Delta\ell_{\rm turb}$ &
+$\Delta\ell_{\rm hb}(z{=}5)$ & Sufficient? \\
+\midrule
+IGM ($z\sim5$)     & 0.1--0.5 & 0.0--0.2 & 3.8 & No \\
+Filaments          & 1--3     & 0.5--1.7 & 3.8 & No \\
+Halo virial region & 1--3     & 0.5--1.7 & 3.8 & No \\
+Cold streams       & 3--10    & 1.7--3.3 & 3.8 & Marginal \\
+ISM (cold, dense)  & 5--10    & 2.3--3.3 & ---$^a$ & N/A \\
+\bottomrule
+\multicolumn{5}{l}{\footnotesize $^a$ Polytropic floor already
+prevents cascade in this regime.}
+\end{tabular}
+\end{table}
+
+At $z = 5$ ($a_{\rm exp} = 1/6$), the holdback suppresses
+$\sim$3.8~levels of refinement.  Turbulence can match this only
+for $\mathcal{M}_{\rm turb} \gtrsim 10$, which occurs exclusively
+in the cold, dense ISM --- where the polytropic floor already
+prevents the cascade.  In the diffuse IGM and filaments where the
+holdback is most critical, typical Mach numbers are
+$\mathcal{M}_{\rm turb} \sim 0.1$--$3$, providing at most 1--2
+levels of protection.  Furthermore, the resolved velocity
+dispersion scales as $\sigma_{\rm turb}(\ell) \propto \Delta
+x^{1/3}$ for Kolmogorov turbulence, so turbulent support weakens
+at finer levels, exacerbating the mismatch.
+
+We therefore conclude that \emph{turbulence alone cannot replace
+the holdback}; the two mechanisms address different physical
+regimes and are complementary rather than interchangeable.
+
+\subsection{Holdback as a Workaround for Cooling Errors}
+\label{sec:holdback_cooling}
+
+The analysis above assumes that all Jeans-triggered refinements at
+high redshift are physically motivated.  However, as demonstrated
+in Section~\ref{sec:overshoot}, the standard Newton--Raphson
+cooling solver produces \emph{time-step-dependent} temperatures:
+cells at different AMR levels receive different $\Delta t$ and
+therefore converge to different temperatures even under identical
+physical conditions.  These artificial temperature discontinuities
+at level boundaries create spurious Jeans-length gradients that
+trigger refinement where no physical density enhancement exists.
+Similarly, a single-redshift cooling table applied at the wrong
+epoch can shift $T_{\rm eq}$ by factors of $\sim$2
+(Section~\ref{sec:multi_z}).  Together, these numerical artefacts
+generate \emph{spurious} Jeans triggers that dominate the
+refinement budget at high~$z$.
+
+With a correct cooling implementation --- the Townsend exact
+integrator providing $\Delta t$-independent temperatures, and
+multi-redshift table interpolation providing the appropriate UV
+background at each epoch --- all cells at the same physical
+conditions converge to the same temperature regardless of their
+AMR level.  The artificial temperature discontinuities at level
+boundaries vanish, eliminating spurious Jeans triggers.  Most
+diffuse gas at high redshift remains in photoionisation equilibrium
+at $T \approx 10^4$\,K.  The Jeans length in this gas is large
+($\lJ \sim 80$\,kpc at $n_{\rm H} = 0.01\,{\rm cm}^{-3}$), well
+above the refinement threshold, and the Jeans criterion does not
+trigger.  Only genuinely self-shielded, collapsing gas triggers
+refinement --- which is the physically correct behaviour.
+
+\textbf{Numerical test.}
+We test this hypothesis directly by running two cosmological
+simulations from $z = 50$ to $z \approx 9$, restarting from
+identical initial conditions with the Jeans criterion active
+($N_J = 4$ at all levels):
+\begin{enumerate}
+  \item \textbf{Holdback ON + exact cooling}: standard configuration
+    with the Townsend integrator and multi-$z$ tables;
+  \item \textbf{Holdback OFF + exact cooling}: identical, but with
+    \code{q\_refine\_holdback = .false.}
+\end{enumerate}
+Both runs use a $512^3$ base grid ($\ell_{\rm min}=9$,
+$\ell_{\rm max}=17$) with 12~MPI ranks.
+Table~\ref{tab:holdback_test} summarises the results after one
+coarse time-step at $z \approx 9$.
+
+\begin{table}
+\centering
+\caption{Comparison of one coarse time-step at $z \approx 9$ with
+and without the holdback mechanism, both using the exact cooling
+integrator with multi-$z$ table interpolation and $N_J = 4$.}
+\label{tab:holdback_test}
+\begin{tabular}{lcc}
+\toprule
+Quantity & Holdback ON & Holdback OFF \\
+\midrule
+Active levels              & 12--14  & 12--17 \\
+Wall time (s)              & 125     & 418 \\
+Grid memory fraction       & 18.3\%  & 24.9\% \\
+Stars formed               & 245     & 277 \\
+Sinks formed               & 25      & 25 \\
+Fine time-step $\Delta t$  & $3.9 \times 10^{-3}$ & $4.0 \times 10^{-4}$ \\
+Star formation levels      & 12--14  & 12--17 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The key result is that the simulation \emph{without holdback did
+not undergo a refinement cascade}.  Grid memory usage increased by
+only 36\,per\,cent (24.9\% vs.\ 18.3\%), and the total number of
+sinks (the most massive collapsed objects) remained identical at~25.
+The 3.3$\times$ increase in wall time is entirely attributable to
+the CFL constraint at level~17 (the fine time-step is
+$\sim$10$\times$ smaller), not to an explosion in the number of
+cells.  Stars form at level~17 in the holdback-off run ---
+physically appropriate resolution for the densest, self-shielded
+gas.
+
+These results support the interpretation that the cosmological
+holdback mechanism has historically been compensating for the
+$\Delta t$-dependent temperature artefacts of the N-R solver
+(Section~\ref{sec:overshoot}) rather than preventing physically
+motivated refinement.  With a $\Delta t$-independent cooling
+implementation, the artificial temperature discontinuities at level
+boundaries vanish, and the holdback is no longer necessary for
+\emph{stability}; its remaining role is purely one of
+\emph{computational cost control}.
+
+
+%======================================================================
+\section{Conclusions}
+\label{sec:conclusions}
+%======================================================================
+
+We have presented three improvements to the handling of the Jeans
+criterion in cosmological AMR simulations, implemented in the
+\curamses\ code:
+
+\begin{enumerate}
+  \item \textbf{Improved cooling module.}  The Eunha cooling module
+    replaces the standard \ramses\ Newton--Raphson solver with the
+    \citet{Townsend2009} exact integration scheme applied to 3D Grackle
+    equilibrium cooling tables \citep{Smith2017}.  The exact integrator
+    is genuinely time-step independent
+    (Section~\ref{sec:exact_cooling}), eliminating the artificial
+    temperature discontinuities at AMR level boundaries that arise from
+    the $\Delta t$-dependent N-R solver
+    (Section~\ref{sec:overshoot}).  It also provides
+    density-dependent metallicity and non-LTE molecular weights.
+    Multi-redshift table interpolation tracks the evolving UV
+    background \citep{HM2012} across cosmic time, eliminating the
+    systematic bias of fixed-$z$ tables.
+
+  \item \textbf{Jeans-independent holdback bypass.}  The
+    \code{jeans\_bypass\_holdback} option allows the Jeans criterion to
+    operate ahead of the cosmological holdback, preventing artificial
+    fragmentation and smoothing the star formation rate transition when
+    levels are released.  A configurable level limit
+    (\code{n\_jeans\_bypass\_levels}) and a physics-based density
+    threshold (\code{d\_jeans\_thre}) provide complementary safeguards
+    against runaway refinement cascades.
+
+  \item \textbf{Quantitative analysis.}  We have shown that differences
+    between the \ramses\ and Grackle cooling rates propagate into
+    40--80\,per\,cent errors in the Jeans length at low densities, and
+    that the $\Delta t$-dependent N-R solver introduces level-dependent
+    temperature biases that drive spurious refinement at AMR level
+    boundaries.  The exact integrator eliminates this entirely.
+
+  \item \textbf{Critical polytropic index.}  The Jeans length in the
+    polytropic regime scales as $\lJ \propto \rho^{(\gstar-2)/2}$.
+    For $\gstar \ge 2$, $\lJ$ is non-decreasing with density and the
+    Jeans criterion self-terminates without any auxiliary mechanisms.
+    However, increasing $\gstar$ from $5/3$ to $2$ raises the
+    temperature floor at the star-formation threshold by a factor
+    of $\sim$4 (Table~\ref{tab:gstar}), necessitating a full
+    recalibration of the star-formation parameters.  The combination
+    of $\gstar = 5/3$ with \code{d\_jeans\_thre}$\,\approx\nstar$
+    provides an effective alternative that preserves the existing
+    calibration while limiting the cascade to 1--2 extra levels
+    (Section~\ref{sec:polytropic}).
+
+  \item \textbf{Holdback diagnosis.}  A direct numerical test at
+    $z \approx 9$ demonstrates that with accurate,
+    $\Delta t$-independent cooling, the cosmological holdback can be
+    disabled without triggering a refinement cascade
+    (Section~\ref{sec:holdback_cooling}).  The holdback has
+    historically been compensating for the level-dependent temperature
+    artefacts of the N-R solver; with the exact integrator and
+    multi-$z$ tables, its role reduces to computational cost control.
+    Turbulent pressure support, while physically important, cannot
+    replace the holdback in the diffuse regime where it is most needed
+    (Section~\ref{sec:turb_vs_holdback}).
+\end{enumerate}
+
+Future work will extend the Jeans criterion to include turbulent
+pressure support (equation~\ref{eq:jeans_turb_disc}), using
+subgrid-scale turbulence models to estimate the unresolved velocity
+dispersion on the grid scale.  A full star formation rate comparison
+from $z = 50$ to $z = 1$ between the standard cooling with holdback
+and the exact cooling without holdback is in progress.  This
+turbulence-dependent refinement criterion, combined with the
+improved cooling module and holdback bypass presented here, will
+provide a comprehensive framework for accurate Jeans length
+resolution in next-generation cosmological simulations.
+
+
+\section*{Acknowledgements}
+
+This work was supported by the Korea Institute for Advanced Study.
+Numerical simulations were performed on the KIAS computing cluster.
+
+
+\bibliographystyle{mnras}
+\begin{thebibliography}{40}
+
+\bibitem[\protect\citeauthoryear{Abel, Bryan \& Norman}{2002}]{Abel2002}
+Abel T., Bryan G.~L., Norman M.~L., 2002, Science, 295, 93
+
+\bibitem[\protect\citeauthoryear{Bate \& Burkert}{1997}]{Bate1997}
+Bate M.~R., Burkert A., 1997, MNRAS, 288, 1060
+
+\bibitem[\protect\citeauthoryear{Berger \& Colella}{1989}]{Berger1989}
+Berger M.~J., Colella P., 1989, J.~Comput.\ Phys., 82, 64
+
+\bibitem[\protect\citeauthoryear{Berger \& Oliger}{1984}]{Berger1984}
+Berger M.~J., Oliger J., 1984, J.~Comput.\ Phys., 53, 484
+
+\bibitem[\protect\citeauthoryear{Bonazzola et al.}{1987}]{Bonazzola1987}
+Bonazzola S., Heyvaerts J., Falgarone E., Perault M., Puget J.~L., 1987,
+A\&A, 172, 293
+
+\bibitem[\protect\citeauthoryear{Bryan et al.}{2014}]{Bryan2014}
+Bryan G.~L., et al., 2014, ApJS, 211, 19
+
+\bibitem[\protect\citeauthoryear{Chandrasekhar}{1951}]{Chandrasekhar1951}
+Chandrasekhar S., 1951, Proc.\ R.\ Soc.\ Lond.\ A, 210, 26
+
+\bibitem[\protect\citeauthoryear{Courty \& Alimi}{2004}]{Courty2004}
+Courty S., Alimi J.-M., 2004, A\&A, 416, 875
+
+\bibitem[\protect\citeauthoryear{Dubois et al.}{2014}]{Dubois2014}
+Dubois Y., et al., 2014, MNRAS, 444, 1453
+
+\bibitem[\protect\citeauthoryear{Dubois et al.}{2021}]{Dubois2021}
+Dubois Y., et al., 2021, A\&A, 651, A109
+
+\bibitem[\protect\citeauthoryear{Faucher-Gigu\`ere}{2020}]{FG2020}
+Faucher-Gigu\`ere C.-A., 2020, MNRAS, 493, 1614
+
+\bibitem[\protect\citeauthoryear{Federrath \& Klessen}{2012}]{Federrath2012}
+Federrath C., Klessen R.~S., 2012, ApJ, 761, 156
+
+\bibitem[\protect\citeauthoryear{Federrath et al.}{2011}]{Federrath2011}
+Federrath C., Sur S., Schleicher D.~R.~G., Banerjee R., Klessen R.~S.,
+2011, ApJ, 731, 62
+
+\bibitem[\protect\citeauthoryear{Ferland et al.}{2017}]{Ferland2017}
+Ferland G.~J., et al., 2017, Rev.\ Mex.\ Astron.\ Astrof., 53, 385
+
+\bibitem[\protect\citeauthoryear{Fromang, Hennebelle \& Teyssier}{2006}]{Fromang2006}
+Fromang S., Hennebelle P., Teyssier R., 2006, A\&A, 457, 371
+
+\bibitem[\protect\citeauthoryear{Haardt \& Madau}{2012}]{HM2012}
+Haardt F., Madau P., 2012, ApJ, 746, 125
+
+\bibitem[\protect\citeauthoryear{Hopkins}{2015}]{Hopkins2015}
+Hopkins P.~F., 2015, MNRAS, 450, 53
+
+\bibitem[\protect\citeauthoryear{Hopkins et al.}{2018}]{Hopkins2018}
+Hopkins P.~F., et al., 2018, MNRAS, 480, 800
+
+\bibitem[\protect\citeauthoryear{Iapichino et al.}{2011}]{Iapichino2011}
+Iapichino L., Schmidt W., Niemeyer J.~C., Merklein J., 2011, MNRAS, 414,
+2297
+
+\bibitem[\protect\citeauthoryear{Jeans}{1902}]{Jeans1902}
+Jeans J.~H., 1902, Phil.\ Trans.\ R.\ Soc.\ Lond.\ A, 199, 1
+
+\bibitem[\protect\citeauthoryear{Kim \& Ostriker}{2017}]{Kim2017}
+Kim C.-G., Ostriker E.~C., 2017, ApJ, 846, 133
+
+\bibitem[\protect\citeauthoryear{Kravtsov, Klypin \& Khokhlov}{1997}]{Kravtsov1997}
+Kravtsov A.~V., Klypin A.~A., Khokhlov A.~M., 1997, ApJS, 111, 73
+
+\bibitem[\protect\citeauthoryear{Lee et al.}{2021}]{Lee2021}
+Lee J., et al., 2021, ApJ, 908, 11
+
+\bibitem[\protect\citeauthoryear{Nelson et al.}{2009}]{Nelson2009}
+Nelson A.~F., 2009, ApJ, 693, 1391
+
+\bibitem[\protect\citeauthoryear{Pillepich et al.}{2018}]{Pillepich2018}
+Pillepich A., et al., 2018, MNRAS, 473, 4077
+
+\bibitem[\protect\citeauthoryear{Pl\"ockinger \& Schaye}{2015}]{Ploeckinger2015}
+Pl\"ockinger S., Schaye J., 2015, MNRAS, 452, 511
+
+\bibitem[\protect\citeauthoryear{Rennehan}{2021}]{Rennehan2021}
+Rennehan D., 2021, MNRAS, 506, 2836
+
+\bibitem[\protect\citeauthoryear{Robertson \& Kravtsov}{2008}]{Robertson2008}
+Robertson B.~E., Kravtsov A.~V., 2008, ApJ, 680, 1083
+
+\bibitem[\protect\citeauthoryear{Schaye et al.}{2015}]{Schaye2015}
+Schaye J., et al., 2015, MNRAS, 446, 521
+
+\bibitem[\protect\citeauthoryear{Schmidt \& Federrath}{2011}]{Schmidt2011}
+Schmidt W., Federrath C., 2011, A\&A, 528, A106
+
+\bibitem[\protect\citeauthoryear{Schmidt, Niemeyer \& Hillebrandt}{2006}]{Schmidt2006}
+Schmidt W., Niemeyer J.~C., Hillebrandt W., 2006, A\&A, 450, 265
+
+\bibitem[\protect\citeauthoryear{Semenov, Kravtsov \& Gnedin}{2016}]{Semenov2016}
+Semenov V.~A., Kravtsov A.~V., Gnedin N.~Y., 2016, ApJ, 826, 200
+
+\bibitem[\protect\citeauthoryear{Smith et al.}{2017}]{Smith2017}
+Smith B.~D., Bryan G.~L., Glover S.~C.~O., et al., 2017, MNRAS, 466, 2217
+
+\bibitem[\protect\citeauthoryear{Springel}{2005}]{Springel2005}
+Springel V., 2005, MNRAS, 364, 1105
+
+\bibitem[\protect\citeauthoryear{Springel}{2010}]{Springel2010}
+Springel V., 2010, MNRAS, 401, 791
+
+\bibitem[\protect\citeauthoryear{Sutherland \& Dopita}{1993}]{Sutherland1993}
+Sutherland R.~S., Dopita M.~A., 1993, ApJS, 88, 253
+
+\bibitem[\protect\citeauthoryear{Teyssier}{2002}]{Teyssier2002}
+Teyssier R., 2002, A\&A, 385, 337
+
+\bibitem[\protect\citeauthoryear{Townsend}{2009}]{Townsend2009}
+Townsend R.~H.~D., 2009, ApJS, 181, 391
+
+\bibitem[\protect\citeauthoryear{Truelove et al.}{1997}]{Truelove1997}
+Truelove J.~K., Klein R.~I., McKee C.~F., et al., 1997, ApJL, 489, L179
+
+\bibitem[\protect\citeauthoryear{Wiersma, Schaye \& Smith}{2009}]{Wiersma2009}
+Wiersma R.~P.~C., Schaye J., Smith B.~D., 2009, MNRAS, 393, 99
+
+\end{thebibliography}
+
+\bsp
+\label{lastpage}
+\end{document}
