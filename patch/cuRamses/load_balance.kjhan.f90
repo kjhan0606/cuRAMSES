@@ -460,6 +460,15 @@ subroutine cmp_new_cpu_map
   real(dp),dimension(1:1,1:ndim) :: xx_tmp
   integer,dimension(1:1) :: c_tmp
 
+  ! OMP variables for parallelized remap
+  integer::batch_size, my_base, my_idx
+  integer,dimension(1:overload)::ncell_sub_t
+  integer(kind=8),dimension(1:overload)::npart_sub_t
+
+  ! Time-based load balancing blend factor
+  real(kind=8),dimension(1:MAXLEVEL) :: blend_factor
+  real(kind=8) :: my_cpc, sum_cpc, avg_cpc, tf
+
   ! Local constants
   nxny=nx*ny
   nx_loc=icoarse_max-icoarse_min+1
@@ -475,6 +484,33 @@ subroutine cmp_new_cpu_map
   else
      niter_cost(levelmin:nlevelmax)=1
   endif
+
+  ! Time-based load balancing: compute per-level blend factor
+  blend_factor = 1d0
+#ifndef WITHOUTMPI
+  if(time_balance_alpha > 0d0 .and. nstep_coarse > 0) then
+     do ilevel = levelmin, nlevelmax
+        ! Cost-per-cell on this rank
+        if(level_ncells_loc(ilevel) > 0) then
+           my_cpc = level_time_loc(ilevel) / dble(level_ncells_loc(ilevel))
+        else
+           my_cpc = 0d0
+        end if
+        ! Global average cost-per-cell
+        call MPI_ALLREDUCE(my_cpc, sum_cpc, 1, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, info)
+        avg_cpc = sum_cpc / dble(ncpu)
+        ! Time correction factor
+        if(avg_cpc > 0d0) then
+           tf = my_cpc / avg_cpc   ! >1 means this rank is slower
+        else
+           tf = 1d0
+        end if
+        ! Blend: 1 + alpha*(tf - 1), clamped to [0.5, 2.0]
+        blend_factor(ilevel) = 1d0 + time_balance_alpha * (tf - 1d0)
+        blend_factor(ilevel) = max(0.5d0, min(2.0d0, blend_factor(ilevel)))
+     end do
+  end if
+#endif
 
   if(verbose) print *,"Entering cmp_new_cpu_map"
 
@@ -544,9 +580,16 @@ subroutine cmp_new_cpu_map
   end do
   end do
   end do
-  ! Loop over levels
+  ! Loop over levels (OMP parallelized on igrid loop)
+  !$OMP PARALLEL DEFAULT(SHARED) &
+  !$OMP PRIVATE(igrid,ngrid,ind,iskip,idim,ncell_loc,batch_size,my_base,my_idx, &
+  !$OMP         ind_grid,ind_cell,xx,order_min,order_max,dom,isub,wflag, &
+  !$OMP         ncell_sub_t,npart_sub_t,i)
+  ncell_sub_t=0
+  npart_sub_t=0
   do ilevel=1,nlevelmax
      ! Cell size and cell center offset
+     !$OMP SINGLE
      dx=0.5d0**ilevel
      do ind=1,twotondim
         iz=(ind-1)/4
@@ -560,6 +603,7 @@ subroutine cmp_new_cpu_map
         xc(ind,3)=(dble(iz)-0.5d0)*dx-dble(kcoarse_min)
 #endif
      end do
+     !$OMP END SINGLE
      ! Loop over cpus
      do icpu=1,ncpu
         if(icpu==myid)then
@@ -567,7 +611,8 @@ subroutine cmp_new_cpu_map
         else
            ncache=reception(icpu,ilevel)%ngrid
         end if
-        ! Loop over grids by vector sweeps
+        ! Loop over grids by vector sweeps (OMP workshared)
+        !$OMP DO SCHEDULE(DYNAMIC,4)
         do igrid=1,ncache,nvector
            ! Gather nvector grids
            ngrid=MIN(nvector,ncache-igrid+1)
@@ -599,45 +644,70 @@ subroutine cmp_new_cpu_map
                  call cmp_minmaxorder(xx,order_min,order_max,dx*scale,ncell_loc)
                  call cmp_dommap(xx,dom,ncell_loc)
               end if
+              ! Reserve batch of indices atomically
+              batch_size=ncell_loc
+              if(batch_size>0)then
+                 !$OMP ATOMIC CAPTURE
+                 my_base=ncell
+                 ncell=ncell+batch_size
+                 !$OMP END ATOMIC
+              end if
               ncell_loc=0
               do i=1,ngrid
                  if(cpu_map(ind_cell(i))==myid.and.son(ind_cell(i))==0)then
-                    ncell    =ncell    +1
                     ncell_loc=ncell_loc+1
+                    my_idx=my_base+ncell_loc
                     isub=(dom(ncell_loc)-1)/ncpu+1
-                    ncell_sub(isub)=ncell_sub(isub)+1
+                    ncell_sub_t(isub)=ncell_sub_t(isub)+1
                     if(memory_balance) then
-                       flag1(ncell)=mem_weight_grid
+                       flag1(my_idx)=mem_weight_grid
                     else
-                       flag1(ncell)=8*10 ! Original magic number
+                       flag1(my_idx)=8*10 ! Original magic number
                     endif
                     if(pic)then
-                       flag1(ncell)=flag1(ncell)+numbp(ind_grid(i))
+                       flag1(my_idx)=flag1(my_idx)+numbp(ind_grid(i))
                     endif
                     if(allocated(sink_per_grid))then
-                       flag1(ncell)=flag1(ncell)+sink_per_grid(ind_grid(i))*mem_weight_sink
+                       flag1(my_idx)=flag1(my_idx)+sink_per_grid(ind_grid(i))*mem_weight_sink
                     endif
-                    wflag = flag1(ncell)*niter_cost(ilevel)
-                    if (wflag > 2147483647) then 
+                    wflag = flag1(my_idx)*niter_cost(ilevel)
+                    if (wflag > 2147483647) then
                        write(*,*) ' wrong type for flag1 --> change to integer kind=8: ',wflag
                        stop
                     endif
-                    flag1(ncell)=flag1(ncell)*niter_cost(ilevel)
-                    npart_sub(isub)=npart_sub(isub)+flag1(ncell)
-                    hilbert_key(ncell)=order_max(ncell_loc)
+                    flag1(my_idx)=flag1(my_idx)*niter_cost(ilevel)
+                    ! Time-based blend
+                    if(time_balance_alpha > 0d0 .and. nstep_coarse > 0) then
+                       flag1(my_idx)=nint(dble(flag1(my_idx)) * blend_factor(ilevel))
+                    end if
+                    npart_sub_t(isub)=npart_sub_t(isub)+flag1(my_idx)
+                    hilbert_key(my_idx)=order_max(ncell_loc)
                  end if
               end do
            end do
            ! End loop over cells
         end do
+        !$OMP END DO
         ! End loop over grids
      end do
      ! End loop over cpus
   end do
   ! End loop over levels
+  ! Merge thread-local accumulators
+  !$OMP CRITICAL(merge_remap_cost)
+  do isub=1,overload
+     ncell_sub(isub)=ncell_sub(isub)+ncell_sub_t(isub)
+     npart_sub(isub)=npart_sub(isub)+npart_sub_t(isub)
+  end do
+  !$OMP END CRITICAL(merge_remap_cost)
+  !$OMP END PARALLEL
 
   ! Clean up sink cost array
   if(allocated(sink_per_grid)) deallocate(sink_per_grid)
+
+  ! Reset time-based load balancing accumulators
+  level_time_loc = 0d0
+  level_ncells_loc = 0
 
   !------------------------------------------------
   ! Sort ordering key and store new index in flag2
@@ -717,6 +787,12 @@ subroutine cmp_new_cpu_map
      call build_ksection(update=.true.)
   end if   ! end if not bisection/ksection
 
+  ! Reset time-based load balancing accumulators (ksection/bisection path)
+  if(use_cpubox_decomp) then
+     level_time_loc = 0d0
+     level_ncells_loc = 0
+  end if
+
   ! Free on-demand histogram arrays (no longer needed after build_bisection/ksection)
   if(allocated(bisec_ind_cell))  deallocate(bisec_ind_cell)
   if(allocated(cell_level))      deallocate(cell_level)
@@ -762,7 +838,7 @@ subroutine cmp_new_cpu_map
   end do
   end do
   end do
-  ! Loop over levels
+  ! Loop over levels (OMP parallelized on igrid loop)
   do ilevel=1,nlevelmax
      ! Cell size and cell center offset
      dx=0.5d0**ilevel
@@ -777,15 +853,18 @@ subroutine cmp_new_cpu_map
 #if NDIM>2
         xc(ind,3)=(dble(iz)-0.5d0)*dx-dble(kcoarse_min)
 #endif
-     end do     
+     end do
      ncache=active(ilevel)%ngrid
-     ! Loop over grids by vector sweeps
+     ! Loop over grids by vector sweeps (OMP parallelized)
+     !$OMP PARALLEL DO DEFAULT(SHARED) &
+     !$OMP PRIVATE(igrid,ngrid,ind_grid,ind_cell,xx,order_max,i,ind,iskip,idim,idom,xx_tmp,c_tmp) &
+     !$OMP SCHEDULE(DYNAMIC,4)
      do igrid=1,ncache,nvector
         ! Gather nvector grids
         ngrid=MIN(nvector,ncache-igrid+1)
         do i=1,ngrid
            ind_grid(i)=active(ilevel)%igrid(igrid+i-1)
-        end do           
+        end do
         ! Loop over cells
         do ind=1,twotondim
            iskip=ncoarse+(ind-1)*ngridmax
@@ -824,6 +903,7 @@ subroutine cmp_new_cpu_map
         end do
         ! End loop over cells
      end do
+     !$OMP END PARALLEL DO
      ! End loop over grids
   end do
   ! End loop over levels

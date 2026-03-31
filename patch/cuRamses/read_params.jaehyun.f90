@@ -25,11 +25,12 @@ subroutine read_params
   !--------------------------------------------------
 !jhshin1
   namelist/run_params/clumpfind,cosmo,pic,sink,sinkprops,lightcone,poisson,hydro,rt,verbose,debug &
-       & ,nrestart,ncontrol,nstepmax,nsubcycle,nremap,ordering &
-       & ,bisec_tol,static,geom,overload,cost_weighting,aton &
+       & ,nrestart,ncontrol,nstepmax,nsubcycle,nremap,remap_thresh,ordering &
+       & ,bisec_tol,static,geom,overload,cost_weighting,aton,varcpu_chunk_nfile &
        & ,memory_balance,mem_weight_grid,mem_weight_part,mem_weight_sink &
+       & ,time_balance_alpha &
        & ,jobcontrolfile &
-       & ,gpu_hydro,gpu_poisson,gpu_fft,gpu_sink &
+       & ,gpu_hydro,gpu_poisson,gpu_fft,gpu_sink,gpu_auto_tune,n_cuda_streams &
        & ,use_fftw &
        & ,dump_pk &
        & ,exchange_method &
@@ -38,12 +39,27 @@ subroutine read_params
        & ,de_perturb &
        & ,use_mond &
        & ,use_fR &
-       & ,use_nDGP
+       & ,use_nDGP &
+       & ,use_symmetron &
+       & ,use_dilaton &
+       & ,use_galileon &
+       & ,use_coupled_de &
+       & ,use_ede &
+       & ,use_sgs
   ! Non-standard model namelists (read only when enabled)
   namelist/cpl_params/w0,wa,cs2_de,de_table
   namelist/neutrino_params/omega_nu,neutrino_table
   namelist/fR_params/fR0,fR_n,n_iter_fR,fR_eps
   namelist/nDGP_params/omega_rc,nDGP_branch,n_iter_nDGP,nDGP_eps
+  namelist/symmetron_params/a_ssb,beta_symmetron,L_symmetron, &
+       & n_iter_symmetron,symmetron_eps
+  namelist/dilaton_params/beta_dilaton,L_dilaton,a0_dilaton, &
+       & n_iter_dilaton,dilaton_eps
+  namelist/galileon_params/c2_galileon,c3_galileon, &
+       & n_iter_galileon,galileon_eps
+  namelist/coupled_de_params/beta_cde
+  namelist/ede_params/omega_ede,z_ede,w_ede
+  namelist/sgs_params/sgs_C_prod,sgs_C_diss,sgs_C_smag,sgs_floor,sgs_cap,sgs_e_init,sgs_hydro
   namelist/sidm_params/sidm_cross_section,sidm_npart_min, &
        & sidm_type,sidm_v0,sidm_power, &
        & sidm_courant, &
@@ -219,6 +235,42 @@ subroutine read_params
      read(1,NML=nDGP_params,END=73)
 73   continue
   end if
+  ! Symmetron parameters
+  if(use_symmetron) then
+     rewind(1)
+     read(1,NML=symmetron_params,END=72)
+72   continue
+  end if
+  ! Dilaton parameters
+  if(use_dilaton) then
+     rewind(1)
+     read(1,NML=dilaton_params,END=71)
+71   continue
+  end if
+  ! Galileon parameters
+  if(use_galileon) then
+     rewind(1)
+     read(1,NML=galileon_params,END=70)
+70   continue
+  end if
+  ! Coupled DE parameters
+  if(use_coupled_de) then
+     rewind(1)
+     read(1,NML=coupled_de_params,END=69)
+69   continue
+  end if
+  ! Early DE parameters
+  if(use_ede) then
+     rewind(1)
+     read(1,NML=ede_params,END=68)
+68   continue
+  end if
+  ! SGS turbulence parameters
+  if(use_sgs) then
+     rewind(1)
+     read(1,NML=sgs_params,END=67)
+67   continue
+  end if
 
   !-------------------------------------------------
   ! Read optional nrestart command-line argument
@@ -245,9 +297,10 @@ subroutine read_params
   end if
 #else
   if(myid==1 .and. (gpu_hydro .or. gpu_poisson .or. gpu_fft .or. gpu_sink)) then
-     write(*,'(A,L1,A,L1,A,L1,A,L1)') &
+     write(*,'(A,L1,A,L1,A,L1,A,L1,A,I0)') &
           ' GPU acceleration: hydro=',gpu_hydro, &
-          ' poisson=',gpu_poisson,' fft=',gpu_fft,' sink=',gpu_sink
+          ' poisson=',gpu_poisson,' fft=',gpu_fft,' sink=',gpu_sink, &
+          ' streams=',n_cuda_streams
   end if
 #endif
 
@@ -497,6 +550,157 @@ subroutine read_params
   end if
 
   !-------------------------------------------------
+  ! Scalar field mutual exclusion check
+  ! fR, nDGP, MOND, symmetron, dilaton, galileon: at most 1
+  !-------------------------------------------------
+  i = 0
+  if(use_fR)        i = i + 1
+  if(use_nDGP)      i = i + 1
+  if(use_mond)      i = i + 1
+  if(use_symmetron)  i = i + 1
+  if(use_dilaton)    i = i + 1
+  if(use_galileon)   i = i + 1
+  if(i > 1) then
+     if(myid==1) write(*,*) 'ERROR: Only one scalar field gravity model allowed at a time'
+     if(myid==1) write(*,*) '  (fR, nDGP, MOND, symmetron, dilaton, galileon)'
+     call clean_stop
+  end if
+
+  !-------------------------------------------------
+  ! Symmetron gravity
+  !-------------------------------------------------
+  if(use_symmetron) then
+     if(.not. cosmo) then
+        if(myid==1) write(*,*) 'ERROR: Symmetron requires cosmo=.true.'
+        call clean_stop
+     end if
+     if(.not. poisson) then
+        if(myid==1) write(*,*) 'ERROR: use_symmetron=T requires poisson=T'
+        call clean_stop
+     end if
+     if(a_ssb <= 0d0 .or. a_ssb >= 1d0) then
+        if(myid==1) write(*,*) 'ERROR: a_ssb must be in (0,1)'
+        call clean_stop
+     end if
+     if(L_symmetron <= 0d0) then
+        if(myid==1) write(*,*) 'ERROR: L_symmetron must be > 0'
+        call clean_stop
+     end if
+     if(myid==1) then
+        write(*,'(A)') ' Symmetron gravity enabled'
+        write(*,'(A,F6.3,A,F6.3,A,F8.3,A)') &
+             '   a_ssb=', a_ssb, '  beta=', beta_symmetron, '  L=', L_symmetron, ' Mpc/h'
+        write(*,'(A,I3,A,ES10.3)') '   max_iter=', n_iter_symmetron, '  eps=', symmetron_eps
+     end if
+  end if
+
+  !-------------------------------------------------
+  ! Dilaton gravity
+  !-------------------------------------------------
+  if(use_dilaton) then
+     if(.not. cosmo) then
+        if(myid==1) write(*,*) 'ERROR: Dilaton requires cosmo=.true.'
+        call clean_stop
+     end if
+     if(.not. poisson) then
+        if(myid==1) write(*,*) 'ERROR: use_dilaton=T requires poisson=T'
+        call clean_stop
+     end if
+     if(L_dilaton <= 0d0) then
+        if(myid==1) write(*,*) 'ERROR: L_dilaton must be > 0'
+        call clean_stop
+     end if
+     if(myid==1) then
+        write(*,'(A)') ' Dilaton gravity enabled'
+        write(*,'(A,F6.3,A,F6.3,A,F8.3,A)') &
+             '   a0=', a0_dilaton, '  beta=', beta_dilaton, '  L=', L_dilaton, ' Mpc/h'
+        write(*,'(A,I3,A,ES10.3)') '   max_iter=', n_iter_dilaton, '  eps=', dilaton_eps
+     end if
+  end if
+
+  !-------------------------------------------------
+  ! Galileon (cubic) gravity
+  !-------------------------------------------------
+  if(use_galileon) then
+     if(.not. cosmo) then
+        if(myid==1) write(*,*) 'ERROR: Galileon requires cosmo=.true.'
+        call clean_stop
+     end if
+     if(.not. poisson) then
+        if(myid==1) write(*,*) 'ERROR: use_galileon=T requires poisson=T'
+        call clean_stop
+     end if
+     if(abs(c3_galileon) < 1d-30) then
+        if(myid==1) write(*,*) 'ERROR: c3_galileon must be non-zero'
+        call clean_stop
+     end if
+     if(myid==1) then
+        write(*,'(A)') ' Cubic Galileon gravity enabled'
+        write(*,'(A,ES10.3,A,ES10.3)') '   c2=', c2_galileon, '  c3=', c3_galileon
+        write(*,'(A,I3,A,ES10.3)') '   max_iter=', n_iter_galileon, '  eps=', galileon_eps
+     end if
+  end if
+
+  !-------------------------------------------------
+  ! Coupled Dark Energy
+  !-------------------------------------------------
+  if(use_coupled_de) then
+     if(.not. poisson) then
+        if(myid==1) write(*,*) 'ERROR: use_coupled_de=T requires poisson=T'
+        call clean_stop
+     end if
+     if(myid==1) then
+        write(*,'(A,F8.4)') ' Coupled Dark Energy enabled: beta_cde=', beta_cde
+        write(*,'(A,F10.6)') '   G_eff/G = ', 1d0 + 2d0*beta_cde**2
+     end if
+  end if
+
+  !-------------------------------------------------
+  ! Early Dark Energy (Doran-Robbers)
+  !-------------------------------------------------
+  if(use_ede) then
+     if(.not. cosmo) then
+        if(myid==1) write(*,*) 'ERROR: EDE requires cosmo=.true.'
+        call clean_stop
+     end if
+     if(omega_ede < 0d0 .or. omega_ede >= 1d0) then
+        if(myid==1) write(*,*) 'ERROR: omega_ede must be in [0,1)'
+        call clean_stop
+     end if
+     if(z_ede <= 0d0) then
+        if(myid==1) write(*,*) 'ERROR: z_ede must be > 0'
+        call clean_stop
+     end if
+     if(myid==1) then
+        write(*,'(A)') ' Early Dark Energy (Doran-Robbers) enabled'
+        write(*,'(A,F8.4,A,F10.1,A,F6.3)') &
+             '   omega_ede=', omega_ede, '  z_ede=', z_ede, '  w_ede=', w_ede
+     end if
+  end if
+
+  !-------------------------------------------------
+  ! SGS (Sub-Grid Scale) Turbulence model
+  !-------------------------------------------------
+  if(use_sgs) then
+     if(.not. hydro) then
+        if(myid==1) write(*,*) 'ERROR: use_sgs=T requires hydro=T'
+        call clean_stop
+     end if
+     if(sgs_C_diss <= 0d0) then
+        if(myid==1) write(*,*) 'ERROR: sgs_C_diss must be > 0'
+        call clean_stop
+     end if
+     if(myid==1) then
+        write(*,'(A)') ' SGS turbulence model enabled'
+        write(*,'(A,F6.3,A,F6.3,A,F6.3)') &
+             '   C_prod=', sgs_C_prod, '  C_diss=', sgs_C_diss, '  C_smag=', sgs_C_smag
+        write(*,'(A,ES10.3,A,F6.2,A,ES10.3,A,L1)') '   floor=', sgs_floor, &
+             '  cap=', sgs_cap, '  e_init=', sgs_e_init, '  hydro=', sgs_hydro
+        write(*,'(A,I3,A,I3)') '   isgs=', isgs, '  nvar=', nvar
+     end if
+  end if
+
+  !-------------------------------------------------
   ! Compute time step for outputs
   !-------------------------------------------------
   if(tend>0)then
@@ -579,6 +783,27 @@ subroutine read_params
 
   close(1)
 
+  !-------------------------------------------------
+  ! FPR (Fixed Proper Resolution, Gnedin 2016)
+  ! Must be after read_hydro_params (reads dr_proper)
+  !-------------------------------------------------
+  if(dr_proper > 0.0d0) then
+     if(.not. cosmo) then
+        if(myid==1) write(*,*) 'WARNING: dr_proper>0 but not cosmo run, disabling FPR'
+        dr_proper = 0.0d0
+     else
+        if(myid==1) then
+           write(*,'(A)') ' FPR (Fixed Proper Resolution, Gnedin 2016) enabled'
+           write(*,'(A,F8.3,A)') '   dr_proper = ', dr_proper, ' kpc'
+           if(q_refine_holdback) then
+              write(*,'(A)') '   mode: FPR + binary holdback'
+           else
+              write(*,'(A)') '   mode: FPR only (no holdback)'
+           end if
+        end if
+     end if
+  end if
+
   ! Send the token
 #ifndef WITHOUTMPI
   if(IOGROUPSIZE>0) then
@@ -634,7 +859,9 @@ subroutine read_params
      exp_refine(i)= 2.0
      initfile  (i)= ' '
   end do
-     
+  ! Initialize m_refine_eff from m_refine (FPR adjusts at runtime)
+  m_refine_eff = m_refine
+
   if(.not. nml_ok)then
      if(myid==1)write(*,*)'Too many errors in the namelist'
      if(myid==1)write(*,*)'Aborting...'

@@ -41,7 +41,8 @@ subroutine read_hydro_params(nml_ok)
        & ,m_refine,mass_sph,err_grad_d,err_grad_p,err_grad_u &
        & ,floor_d,floor_u,floor_p,ivar_refine,var_cut_refine &
        & ,interpol_var,interpol_type,sink_refine,d_jeans_thre &
-       & ,q_refine_holdback,m_refine_effective,ref_fall_rate !(ONS)
+       & ,q_refine_holdback,m_refine_effective,ref_fall_rate & !(ONS)
+       & ,dr_proper
   namelist/boundary_params/nboundary,bound_type &
        & ,ibound_min,ibound_max,jbound_min,jbound_max &
        & ,kbound_min,kbound_max &
@@ -338,6 +339,8 @@ subroutine read_hydro_params(nml_ok)
   if(sf_virial)ixion=ivirial+1
   ichem=ixion
   if(aton)ichem=ixion+1
+  isgs=ichem
+  if(use_sgs)isgs=ichem+1
   if(myid==1) then
      write(*,*) 'Hydro var indices:'
 #if NENER>0
@@ -348,8 +351,17 @@ subroutine read_hydro_params(nml_ok)
      if(sf_virial)       write(*,*) '   ivirial = ',ivirial
      if(aton)            write(*,*) '   ixion   = ',ixion
      write(*,*) '   ichem   = ',ichem
+     if(use_sgs)         write(*,*) '   isgs    = ',isgs
   endif
-  ! Last variable is ichem
+  ! Last variable is isgs (or ichem if use_sgs=.false.)
+  ! Runtime check: make sure NVAR is large enough
+  if(use_sgs .and. isgs > nvar) then
+     if(myid==1) then
+        write(*,*) 'ERROR: use_sgs=T requires NVAR >= ', isgs
+        write(*,*) '  Current NVAR=', nvar, '. Recompile with NVAR=', isgs
+     end if
+     call clean_stop
+  end if
 
 end subroutine read_hydro_params
 

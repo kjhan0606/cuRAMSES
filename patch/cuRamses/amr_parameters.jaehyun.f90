@@ -68,6 +68,8 @@ module amr_parameters
   logical::gpu_poisson=.false. ! GPU Poisson MG for AMR levels
   logical::gpu_fft=.false.     ! cuFFT direct solve for uniform base level
   logical::gpu_sink=.false.    ! GPU AGN feedback (average_AGN + AGN_blast)
+  logical::gpu_auto_tune=.true.! Auto-tune CPU vs GPU (disable for benchmarks)
+  integer::n_cuda_streams=1   ! Number of CUDA streams (runtime, max 16)
 
   ! FFTW3 CPU direct Poisson solver (requires USE_FFTW compilation)
   logical::use_fftw=.false.    ! FFTW3 CPU direct solve for uniform base level
@@ -118,10 +120,11 @@ module amr_parameters
   integer::nbileafnodes=2     ! Max number of leaf (terminal) nodes
   real(dp)::bisec_tol=0.05d0  ! Tolerance for bisection load balancing
   logical::use_cpubox_decomp=.false. ! True for bisection or ksection
-  logical::memory_balance=.false.    ! Memory-based load balancing
+  logical::memory_balance=.true.     ! Memory-based load balancing
   integer::mem_weight_grid=0          ! 0 = auto from nvar; >0 = user override
   integer::mem_weight_part=12        ! Memory per particle in dp-equivalents
   integer::mem_weight_sink=500      ! Computational weight per sink particle
+  real(dp)::time_balance_alpha=0d0  ! Time-based LB blend: 0=memory-only, 0.3-0.5=hybrid
 
   ! Step parameters
   integer::nrestart=0         ! New run or backup file number
@@ -133,6 +136,8 @@ module amr_parameters
   integer::ncontrol=1         ! Write control variables
   integer::fbackup=1000000    ! Backup data to disk
   integer::nremap=5           ! Load balancing frequency (0: never, 5: optimal)
+  real(dp)::remap_thresh=0.05d0 ! Weight inhomogeneity threshold for auto remap (5%)
+  integer::varcpu_chunk_nfile=0 ! Chunked varcpu restart: 0=all-at-once, N>0=files per chunk
 
   ! Output parameters
   integer::iout=1             ! Increment for output times
@@ -214,6 +219,8 @@ module amr_parameters
   real(dp)::T2_star=0.0D0     ! Typical ISM polytropic temperature
   real(dp)::g_star =1.6D0     ! Typical ISM polytropic index
   real(dp)::jeans_ncells=-1   ! Jeans polytropic EOS
+  real(dp)::eeos_poly_coeff=0d0 ! Polytropic floor: e_floor = coeff * rho^alpha (code units)
+  real(dp)::eeos_poly_alpha=0d0 ! Polytropic floor exponent (g_star or 2 for jeans_ncells)
   real(dp)::del_star=2.D2     ! Minimum overdensity to define ISM
   real(dp)::f_ek   =1.0D0     ! Supernovae kinetic energy fraction (only between 0 and 1)
   real(dp)::rbubble=0.0D0     ! Supernovae superbubble radius in pc
@@ -338,6 +345,50 @@ module amr_parameters
   integer ::n_iter_nDGP=20              ! Max Newton-GS iterations
   real(dp)::nDGP_eps=1.0d-6             ! Convergence threshold
 
+  ! Symmetron gravity parameters
+  logical ::use_symmetron=.false.        ! Enable Symmetron scalar field
+  real(dp)::a_ssb=0.5d0                 ! SSB scale factor
+  real(dp)::beta_symmetron=1.0d0        ! Coupling strength
+  real(dp)::L_symmetron=1.0d0           ! Compton wavelength [Mpc/h]
+  integer ::n_iter_symmetron=20          ! Max Newton-GS iterations
+  real(dp)::symmetron_eps=1.0d-6        ! Convergence threshold
+
+  ! Dilaton gravity parameters (Damour-Polyakov)
+  logical ::use_dilaton=.false.          ! Enable environmentally dependent dilaton
+  real(dp)::beta_dilaton=1.0d0          ! Coupling strength
+  real(dp)::L_dilaton=1.0d0             ! Compton wavelength [Mpc/h]
+  real(dp)::a0_dilaton=0.5d0            ! Transition scale factor
+  integer ::n_iter_dilaton=20            ! Max Newton-GS iterations
+  real(dp)::dilaton_eps=1.0d-6          ! Convergence threshold
+
+  ! Galileon (cubic) gravity parameters
+  logical ::use_galileon=.false.         ! Enable cubic Galileon scalar field
+  real(dp)::c2_galileon=-1.0d0          ! Kinetic coefficient
+  real(dp)::c3_galileon=1.0d0           ! Cubic coefficient
+  integer ::n_iter_galileon=20           ! Max Newton-GS iterations
+  real(dp)::galileon_eps=1.0d-6         ! Convergence threshold
+
+  ! Coupled Dark Energy parameters
+  logical ::use_coupled_de=.false.       ! Enable DM-DE coupling
+  real(dp)::beta_cde=0.1d0              ! DM-DE coupling constant
+
+  ! Early Dark Energy (Doran-Robbers) parameters
+  logical ::use_ede=.false.              ! Enable Early Dark Energy
+  real(dp)::omega_ede=0.04d0            ! EDE energy density fraction
+  real(dp)::z_ede=3000.0d0              ! EDE injection redshift
+  real(dp)::w_ede=0.333d0               ! EDE equation of state
+
+  ! SGS (Sub-Grid Scale) Turbulence model parameters
+  logical ::use_sgs=.false.              ! Enable SGS turbulence model
+  integer ::isgs=0                       ! Variable index for ρ·e_sgs (set at runtime)
+  real(dp)::sgs_C_prod =0.0d0           ! Production coefficient (gravitational)
+  real(dp)::sgs_C_diss =2.76d0          ! Dissipation coefficient (C_eps=1.5)
+  real(dp)::sgs_C_smag =0.10d0          ! Smagorinsky coefficient (shear production)
+  real(dp)::sgs_floor  =1.0d-30         ! Floor value for e_sgs (positivity)
+  real(dp)::sgs_cap    =1.0d0           ! Max ratio P_turb/P_thermal (cap)
+  real(dp)::sgs_e_init =0.01d0          ! Initial e_sgs/e_thermal at restart from non-SGS
+  logical ::sgs_hydro =.false.           ! Add P_turb to Riemann solver (T=full coupling, F=source-only)
+
 !chemo flags and variables
   real(dp)::rcell  =2.0D0     ! Supernovae superbubble radius in cells
   real(dp)::tol    =5.D-6     ! Tolerance factor used in the chemo version
@@ -421,6 +472,8 @@ module amr_parameters
   real(dp)::m_refine_effective = 10000 ! (ONS)
   logical::q_refine_holdback=.true. !(ONS) ! default to the original form
   real(dp)::ref_fall_rate = 60.
+  real(dp)::dr_proper=0.0d0           ! FPR target proper resolution [kpc]. 0=disabled.
+  real(dp),dimension(1:MAXLEVEL)::m_refine_eff=-1.0  ! FPR-adjusted effective m_refine
 
   ! Initial condition files for each level
   logical::multiple=.false.

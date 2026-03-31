@@ -5,6 +5,8 @@ recursive subroutine amr_step(ilevel,icount)
   use poisson_commons
 #ifdef HYDRO_CUDA
   use cuda_commons, only: cuda_pool_is_initialized_c
+  use poisson_cuda_interface, only: cuda_mg_release_arrays_c
+  use hydro_cuda_interface, only: cuda_mesh_free_c
 #endif
 #ifdef RT
   use rt_hydro_commons
@@ -31,6 +33,7 @@ recursive subroutine amr_step(ilevel,icount)
   integer:: info
 
   real(kind=4):: real_mem, real_mem_tot
+  real(kind=8):: t_lb_level_start, t_lb_level_end
 
   ! Particle sub-timers
   integer(kind=8) :: pt_t1, pt_t2, pt_rate
@@ -81,17 +84,19 @@ recursive subroutine amr_step(ilevel,icount)
   !---------------------------------------------------
   if(ilevel==levelmin) then
      ! Hydro auto-tuning: init + flag setting
-     if(.not. hy_auto_init .and. gpu_hydro) then
-        hy_auto_init = .true.
-        hy_auto_phase = 0
-     endif
-     if(hy_auto_init) then
-        if(hy_auto_phase == 0) then
-           gpu_hydro = .false.
-        else if(hy_auto_phase == 1) then
-           gpu_hydro = .true.
-        else
-           gpu_hydro = hy_use_gpu
+     if(gpu_auto_tune) then
+        if(.not. hy_auto_init .and. gpu_hydro) then
+           hy_auto_init = .true.
+           hy_auto_phase = 0
+        endif
+        if(hy_auto_init) then
+           if(hy_auto_phase == 0) then
+              gpu_hydro = .false.
+           else if(hy_auto_phase == 1) then
+              gpu_hydro = .true.
+           else
+              gpu_hydro = hy_use_gpu
+           endif
         endif
      endif
      ! Poisson auto-tuning: init is done near multigrid_fine call
@@ -177,6 +182,14 @@ recursive subroutine amr_step(ilevel,icount)
                  call defrag
                  ok_defrag=.true.
               endif
+           end if
+        else if(remap_thresh>0d0)then
+           ! Auto remap: check weight inhomogeneity every coarse step
+           ! Skip first step on restart (already balanced before dump)
+           if(nrestart>0.and.first_step)then
+              first_step=.false.
+           else
+              call check_load_imbalance(ok_defrag)
            end if
         end if
      endif
@@ -275,7 +288,8 @@ recursive subroutine amr_step(ilevel,icount)
         ! Kinetic feedback
         !----------------------------------------------------
      if(hydro.and.star.and.f_w>0.)call kinetic_feedback
-     
+     if(hydro.and.star.and.f_w>0.)call diag_check_eint('kinetic_fb',0)
+
      call timer('sinks','start')
 #ifdef HYDRO_CUDA
      ! --- GPU auto-tuning: set gpu_sink for this step ---
@@ -295,6 +309,7 @@ recursive subroutine amr_step(ilevel,icount)
 #endif
      call system_clock(sk_t1)
      if(sink .and. sink_AGN)call AGN_feedback
+     if(sink .and. sink_AGN)call diag_check_eint('AGN_fb',0)
      call system_clock(sk_t2)
      sk_agn_fb = sk_agn_fb + dble(sk_t2-sk_t1)/dble(pt_rate)
 #ifdef HYDRO_CUDA
@@ -346,8 +361,18 @@ recursive subroutine amr_step(ilevel,icount)
      !-----------------------------------------------------
      call system_clock(sk_t1)
      if(sink)call create_sink
+     if(sink)call diag_check_eint('create_sink',0)
      call system_clock(sk_t2)
      sk_create_sink = sk_create_sink + dble(sk_t2-sk_t1)/dble(pt_rate)
+
+     !-----------------------------------------------------
+     ! Enforce eEOS floor after sink/AGN operations
+     ! Prevents negative internal energy AND extreme velocity
+     ! from AGN jet momentum injection (energy-conservative)
+     !-----------------------------------------------------
+     if(hydro .and. eeos_poly_coeff > 0d0)then
+        call enforce_eeos_after_sink
+     endif
 
   endif
 
@@ -411,19 +436,21 @@ recursive subroutine amr_step(ilevel,icount)
      ! gpu_fft is excluded from auto-tuning because cuFFT direct solve
      ! and MG V-cycle produce different potential scales, so switching
      ! between them mid-run causes energy conservation failure.
-     if(.not. mg_auto_init .and. gpu_poisson) then
-        mg_auto_init = .true.
-        mg_auto_phase = 0
-        mg_orig_poisson = gpu_poisson
-     endif
-     if(mg_auto_init .and. ilevel==levelmin) then
-        if(mg_auto_phase == 0) then
-           gpu_poisson = .false.
-        else if(mg_auto_phase == 1) then
-           gpu_poisson = mg_orig_poisson
-        else
-           if(.not. mg_use_gpu) then
+     if(gpu_auto_tune) then
+        if(.not. mg_auto_init .and. gpu_poisson) then
+           mg_auto_init = .true.
+           mg_auto_phase = 0
+           mg_orig_poisson = gpu_poisson
+        endif
+        if(mg_auto_init .and. ilevel==levelmin) then
+           if(mg_auto_phase == 0) then
               gpu_poisson = .false.
+           else if(mg_auto_phase == 1) then
+              gpu_poisson = mg_orig_poisson
+           else
+              if(.not. mg_use_gpu) then
+                 gpu_poisson = .false.
+              endif
            endif
         endif
      endif
@@ -550,6 +577,33 @@ recursive subroutine amr_step(ilevel,icount)
         call timer('poisson','start')
      end if
 
+     !-------------------------------------------------
+     ! Symmetron gravity
+     !-------------------------------------------------
+     if(use_symmetron) then
+        call timer('symmetron','start')
+        call symmetron_solve_level(ilevel, icount)
+        call timer('poisson','start')
+     end if
+
+     !-------------------------------------------------
+     ! Dilaton gravity
+     !-------------------------------------------------
+     if(use_dilaton) then
+        call timer('dilaton','start')
+        call dilaton_solve_level(ilevel, icount)
+        call timer('poisson','start')
+     end if
+
+     !-------------------------------------------------
+     ! Galileon (cubic) gravity
+     !-------------------------------------------------
+     if(use_galileon) then
+        call timer('galileon','start')
+        call galileon_solve_level(ilevel, icount)
+        call timer('poisson','start')
+     end if
+
      ! Synchronize remaining particles for gravity
      if(pic)then
                                call timer('particles','start')
@@ -595,6 +649,7 @@ recursive subroutine amr_step(ilevel,icount)
            else
               call grow_jeans(ilevel)
            endif
+           call diag_check_eint('grow_bondi',ilevel)
         endif
         call system_clock(sk_t2)
         sk_grow = sk_grow + dble(sk_t2-sk_t1)/dble(pt_rate)
@@ -680,15 +735,20 @@ recursive subroutine amr_step(ilevel,icount)
 
      ! Hyperbolic solver
                                call timer('hydro - godunov','start')
+     t_lb_level_start = MPI_WTIME()
 #ifdef HYDRO_CUDA
      ! --- GPU auto-tuning for hydro: flags set at levelmin entry ---
      ! (actual flag setting is done at start of amr_step(levelmin))
 #endif
 #ifdef HYDRO_CUDA
      call system_clock(hy_t1)
+     ! Release MG Poisson GPU arrays before hydro mesh allocation
+     if(gpu_hydro) call cuda_mg_release_arrays_c()
 #endif
      call godunov_fine(ilevel)
 #ifdef HYDRO_CUDA
+     ! Free hydro mesh from GPU after godunov_fine
+     if(gpu_hydro) call cuda_mesh_free_c()
      call system_clock(hy_t2)
      if(hy_auto_init) then
         hy_dt = dble(hy_t2-hy_t1)/dble(pt_rate)
@@ -723,6 +783,7 @@ recursive subroutine amr_step(ilevel,icount)
 !    call MPI_BARRIER(MPI_COMM_WORLD,mpi_err)
                                call timer('poisson','start')
      if(poisson)call synchro_hydro_fine(ilevel,+0.5*dtnew(ilevel))
+     call diag_check_eint('godunov+sync',ilevel)
 
      ! Restriction operator
                                call timer('hydro upload fine','start')
@@ -758,8 +819,11 @@ recursive subroutine amr_step(ilevel,icount)
 #else
                                call timer('cooling','start')
   if(neq_chem.or.cooling.or.T2_star>0.0)call cooling_fine(ilevel)
+  call diag_check_eint('cooling',ilevel)
 #endif
-  
+  ! SGS turbulence source terms (production, dissipation, PdV coupling)
+  if(use_sgs)call sgs_fine(ilevel)
+
   !---------------
   ! Move particles
   !---------------
@@ -815,6 +879,10 @@ recursive subroutine amr_step(ilevel,icount)
                                call timer('flag','start')
   if(.not.static) call flag_fine(ilevel,icount)
 
+  ! Accumulate per-level timing for time-based load balancing
+  t_lb_level_end = MPI_WTIME()
+  level_time_loc(ilevel) = level_time_loc(ilevel) + (t_lb_level_end - t_lb_level_start)
+  level_ncells_loc(ilevel) = numbl(myid,ilevel) * twotondim
 
   !----------------------------
   ! Merge finer level particles
@@ -1019,3 +1087,58 @@ subroutine rt_step(ilevel)
   
 end subroutine rt_step
 #endif
+!###########################################################
+!###########################################################
+subroutine check_load_imbalance(did_remap)
+  ! Check weight inhomogeneity and trigger load_balance if
+  ! max/avg - 1 > remap_thresh.
+  ! Called every coarse step when nremap==0 and remap_thresh>0.
+  use amr_commons
+  implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
+  logical,intent(out)::did_remap
+
+  real(dp)::my_cost,max_cost,sum_cost,imbalance
+  integer::ilevel,info,nsub
+#ifndef WITHOUTMPI
+  real(dp)::buf(2),gbuf(2)
+#endif
+
+  did_remap=.false.
+
+  ! Compute local cost: weighted grid count (subcycle-aware)
+  my_cost=0d0
+  nsub=1
+  do ilevel=levelmin,nlevelmax
+     my_cost=my_cost+dble(numbl(myid,ilevel))*dble(nsub)
+     nsub=nsub*nsubcycle(ilevel)
+  end do
+
+#ifndef WITHOUTMPI
+  buf(1)=my_cost
+  buf(2)=my_cost
+  call MPI_ALLREDUCE(buf(1),max_cost,1,MPI_DOUBLE_PRECISION,MPI_MAX,MPI_COMM_WORLD,info)
+  call MPI_ALLREDUCE(buf(2),sum_cost,1,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+#else
+  max_cost=my_cost
+  sum_cost=my_cost
+#endif
+
+  if(sum_cost>0d0)then
+     imbalance=(max_cost-sum_cost/dble(ncpu))/(sum_cost/dble(ncpu))
+  else
+     imbalance=0d0
+  end if
+
+  if(imbalance>remap_thresh)then
+     if(myid==1) write(*,'(A,F6.2,A,F6.2,A)') &
+          ' Load imbalance ',imbalance*100d0,'% > threshold ', &
+          remap_thresh*100d0,'% -> rebalancing'
+     call load_balance
+     call defrag
+     did_remap=.true.
+  end if
+
+end subroutine check_load_imbalance

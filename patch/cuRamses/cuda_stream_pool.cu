@@ -8,8 +8,9 @@
 #include <cstdio>
 #include <cstring>
 
-// Global pool
-static StreamSlot g_pool[N_STREAMS];
+// Global pool (sized to compile-time max; only g_n_active_streams are used)
+static StreamSlot g_pool[MAX_CUDA_STREAMS];
+static int g_n_active_streams = 1;
 static bool pool_initialized = false;
 static int g_device_id = 0;
 
@@ -32,6 +33,9 @@ static long long  g_mesh_ncell = 0;
 static cudaStream_t g_upload_stream = nullptr;
 static cudaEvent_t  g_upload_done_event = nullptr;
 static bool         g_mesh_host_pinned = false;
+static const void*  g_pinned_uold = nullptr;  // track pinned host ptrs for unregister
+static const void*  g_pinned_f    = nullptr;
+static const void*  g_pinned_son  = nullptr;
 
 // ============================================================================
 // Buffer management helpers (2x over-allocation)
@@ -210,7 +214,7 @@ static void ensure_pinned_buffers(int slot, int ngrid) {
 
 extern "C" {
 
-void cuda_pool_init(int local_rank) {
+void cuda_pool_init(int local_rank, int n_streams) {
     int device_count = 0;
     cudaGetDeviceCount(&device_count);
     if (device_count <= 0) {
@@ -221,15 +225,21 @@ void cuda_pool_init(int local_rank) {
     g_device_id = local_rank % device_count;
     cudaSetDevice(g_device_id);
 
+    // Clamp requested streams to [1, MAX_CUDA_STREAMS]
+    if (n_streams < 1) n_streams = 1;
+    if (n_streams > MAX_CUDA_STREAMS) n_streams = MAX_CUDA_STREAMS;
+    g_n_active_streams = n_streams;
+
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, g_device_id);
-    printf("CUDA pool: MPI local rank %d -> GPU %d (%s, %.1f GB, SM %d.%d, PCIe %04x:%02x)\n",
+    printf("CUDA pool: MPI local rank %d -> GPU %d (%s, %.1f GB, SM %d.%d, PCIe %04x:%02x, streams=%d)\n",
            local_rank, g_device_id, prop.name,
            prop.totalGlobalMem / 1073741824.0,
            prop.major, prop.minor,
-           prop.pciBusID, prop.pciDeviceID);
+           prop.pciBusID, prop.pciDeviceID,
+           g_n_active_streams);
 
-    for (int s = 0; s < N_STREAMS; s++) {
+    for (int s = 0; s < g_n_active_streams; s++) {
         cudaStreamCreateWithFlags(&g_pool[s].stream, cudaStreamNonBlocking);
         g_pool[s].busy = 0;
         g_pool[s].d_uloc = nullptr; g_pool[s].d_gloc = nullptr;
@@ -268,7 +278,7 @@ int cuda_acquire_stream(void) {
     if (!pool_initialized) return -1;
     // Ensure this OMP thread uses the correct GPU device (per-thread context)
     cudaSetDevice(g_device_id);
-    for (int s = 0; s < N_STREAMS; s++) {
+    for (int s = 0; s < g_n_active_streams; s++) {
         if (!g_pool[s].busy) {
             if (__sync_lock_test_and_set(&g_pool[s].busy, 1) == 0) {
                 return s;
@@ -284,29 +294,29 @@ int cuda_acquire_stream(void) {
 }
 
 void cuda_release_stream(int slot) {
-    if (slot < 0 || slot >= N_STREAMS) return;
+    if (slot < 0 || slot >= g_n_active_streams) return;
     __sync_lock_release(&g_pool[slot].busy);
 }
 
 void cuda_stream_sync(int slot) {
-    if (slot < 0 || slot >= N_STREAMS) return;
+    if (slot < 0 || slot >= g_n_active_streams) return;
     cudaStreamSynchronize(g_pool[slot].stream);
     __sync_lock_release(&g_pool[slot].busy);
 }
 
 int cuda_stream_query(int slot) {
-    if (slot < 0 || slot >= N_STREAMS) return 0;
+    if (slot < 0 || slot >= g_n_active_streams) return 0;
     return (cudaStreamQuery(g_pool[slot].stream) == cudaSuccess) ? 1 : 0;
 }
 
 int cuda_get_n_streams(void) {
     if (!pool_initialized) return 0;
-    return N_STREAMS;
+    return g_n_active_streams;
 }
 
 void cuda_pool_finalize(void) {
     if (!pool_initialized) return;
-    for (int s = 0; s < N_STREAMS; s++) {
+    for (int s = 0; s < g_n_active_streams; s++) {
         cudaStreamSynchronize(g_pool[s].stream);
         cudaStreamDestroy(g_pool[s].stream);
         if (g_pool[s].d_uloc) cudaFree(g_pool[s].d_uloc);
@@ -338,7 +348,14 @@ void cuda_pool_finalize(void) {
             }
         }
     }
-    // Free persistent mesh arrays
+    // Unregister persistent host pins
+    if (g_mesh_host_pinned) {
+        if (g_pinned_uold) { cudaHostUnregister((void*)g_pinned_uold); g_pinned_uold = nullptr; }
+        if (g_pinned_f)    { cudaHostUnregister((void*)g_pinned_f);    g_pinned_f    = nullptr; }
+        if (g_pinned_son)  { cudaHostUnregister((void*)g_pinned_son);  g_pinned_son  = nullptr; }
+        g_mesh_host_pinned = false;
+    }
+    // Free persistent mesh device arrays
     if (d_mesh_uold) { cudaFree(d_mesh_uold); d_mesh_uold = nullptr; }
     if (d_mesh_f)    { cudaFree(d_mesh_f);    d_mesh_f    = nullptr; }
     if (d_mesh_son)  { cudaFree(d_mesh_son);  d_mesh_son  = nullptr; }
@@ -357,6 +374,9 @@ void cuda_mesh_upload(const double* uold, const double* f_grav,
                       const int* son, long long ncell, int nvar, int ndim) {
     if (!pool_initialized) return;
 
+    // Clear stale CUDA errors from previous operations
+    cudaGetLastError();
+
     // Create dedicated upload stream + event on first call
     if (!g_upload_stream) {
         cudaStreamCreateWithFlags(&g_upload_stream, cudaStreamNonBlocking);
@@ -365,11 +385,11 @@ void cuda_mesh_upload(const double* uold, const double* f_grav,
 
     // Reallocate if size changed
     if (ncell != g_mesh_ncell) {
-        // Unpin previous host arrays if pinned
+        // Unpin previous host arrays if pinned (use tracked pointers)
         if (g_mesh_host_pinned) {
-            cudaHostUnregister((void*)uold);  // same pointer, just unpin
-            if (f_grav) cudaHostUnregister((void*)f_grav);
-            cudaHostUnregister((void*)son);
+            if (g_pinned_uold) { cudaHostUnregister((void*)g_pinned_uold); g_pinned_uold = nullptr; }
+            if (g_pinned_f)    { cudaHostUnregister((void*)g_pinned_f);    g_pinned_f    = nullptr; }
+            if (g_pinned_son)  { cudaHostUnregister((void*)g_pinned_son);  g_pinned_son  = nullptr; }
             g_mesh_host_pinned = false;
         }
         if (d_mesh_uold) { cudaFree(d_mesh_uold); d_mesh_uold = nullptr; }
@@ -398,7 +418,7 @@ void cuda_mesh_upload(const double* uold, const double* f_grav,
         cudaError_t e2 = cudaMalloc(&d_mesh_f,    (size_t)ncell * ndim * sizeof(double));
         cudaError_t e3 = cudaMalloc(&d_mesh_son,  (size_t)ncell * sizeof(int));
         if (e1 != cudaSuccess || e2 != cudaSuccess || e3 != cudaSuccess) {
-            fprintf(stderr, "CUDA mesh: allocation FAILED (%.1f GB). Falling back to CPU gather.\n", gb);
+            fprintf(stderr, "CUDA mesh: allocation FAILED (%.1f GB). Falling back to CPU.\n", gb);
             if (d_mesh_uold) { cudaFree(d_mesh_uold); d_mesh_uold = nullptr; }
             if (d_mesh_f)    { cudaFree(d_mesh_f);    d_mesh_f    = nullptr; }
             if (d_mesh_son)  { cudaFree(d_mesh_son);  d_mesh_son  = nullptr; }
@@ -406,7 +426,7 @@ void cuda_mesh_upload(const double* uold, const double* f_grav,
             return;
         }
         g_mesh_ncell = ncell;
-        printf("CUDA mesh: allocated %.1f GB (ncell=%lld, nvar=%d, free=%.1f/%.1f GB)\n",
+        fprintf(stderr, "CUDA mesh: allocated %.1f GB (ncell=%lld, nvar=%d, free=%.1f/%.1f GB)\n",
                gb, ncell, nvar,
                (double)(free_mem - need) / (1024.0*1024.0*1024.0),
                (double)total_mem / (1024.0*1024.0*1024.0));
@@ -417,15 +437,16 @@ void cuda_mesh_upload(const double* uold, const double* f_grav,
         cudaError_t ep = cudaHostRegister((void*)uold,
             (size_t)ncell * nvar * sizeof(double), cudaHostRegisterDefault);
         if (ep == cudaSuccess) {
-            if (f_grav)
+            g_pinned_uold = uold;
+            if (f_grav) {
                 cudaHostRegister((void*)f_grav,
                     (size_t)ncell * ndim * sizeof(double), cudaHostRegisterDefault);
+                g_pinned_f = f_grav;
+            }
             cudaHostRegister((void*)son,
                 (size_t)ncell * sizeof(int), cudaHostRegisterDefault);
+            g_pinned_son = son;
             g_mesh_host_pinned = true;
-            double gb_pin = ((double)ncell * (nvar + ndim) * sizeof(double) +
-                             (double)ncell * sizeof(int)) / (1024.0*1024.0*1024.0);
-            printf("CUDA mesh: pinned %.1f GB host memory for async DMA\n", gb_pin);
         }
     }
 
@@ -459,24 +480,16 @@ void cuda_mesh_upload(const double* uold, const double* f_grav,
 }
 
 void cuda_mesh_free(void) {
+    // Persistent mode: keep device arrays + host pins alive for reuse.
+    // cuda_mesh_upload() skips realloc when ncell == g_mesh_ncell.
+    // Final cleanup happens in cuda_pool_finalize().
     if (g_upload_stream) {
         cudaStreamSynchronize(g_upload_stream);
-        cudaStreamDestroy(g_upload_stream);  g_upload_stream = nullptr;
     }
-    if (g_upload_done_event) {
-        cudaEventDestroy(g_upload_done_event); g_upload_done_event = nullptr;
-    }
-    // Note: host arrays are still in use by Fortran, don't unregister here
-    // (they will be freed by Fortran deallocate which handles unpin)
-    g_mesh_host_pinned = false;
-    if (d_mesh_uold) { cudaFree(d_mesh_uold); d_mesh_uold = nullptr; }
-    if (d_mesh_f)    { cudaFree(d_mesh_f);    d_mesh_f    = nullptr; }
-    if (d_mesh_son)  { cudaFree(d_mesh_son);  d_mesh_son  = nullptr; }
-    g_mesh_ncell = 0;
 }
 
 void hydro_cuda_profile_accumulate(int stream_slot, int ngrid) {
-    if (stream_slot < 0 || stream_slot >= N_STREAMS) return;
+    if (stream_slot < 0 || stream_slot >= g_n_active_streams) return;
     StreamSlot& s = g_pool[stream_slot];
     if (!s.ev_initialized) return;
     // Events must already be recorded and stream synchronized
@@ -595,7 +608,7 @@ bool is_pool_initialized() { return pool_initialized; }
 bool pool_ensure_hydro_buffers(int slot, int ngrid) { return ensure_hydro_buffers(slot, ngrid); }
 bool pool_ensure_hydro_inter_buffers(int slot, int ngrid) { return ensure_hydro_inter_buffers(slot, ngrid); }
 cudaStream_t cuda_get_stream_internal(int slot) {
-    if (slot < 0 || slot >= N_STREAMS) return 0;
+    if (slot < 0 || slot >= g_n_active_streams) return 0;
     return g_pool[slot].stream;
 }
 bool pool_ensure_stencil_buffers(int slot, int ngrid, int n_interp) {
@@ -613,3 +626,4 @@ int*      cuda_get_mesh_son()   { return d_mesh_son; }
 long long cuda_get_mesh_ncell() { return g_mesh_ncell; }
 int       cuda_mesh_is_ready()  { return (g_mesh_ncell > 0 && d_mesh_uold && d_mesh_son) ? 1 : 0; }
 cudaEvent_t cuda_get_upload_event() { return g_upload_done_event; }
+

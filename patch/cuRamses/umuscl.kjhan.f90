@@ -877,7 +877,7 @@ subroutine ctoprim(uin,q,c,gravin,dt,ngrid)
   real(dp),dimension(1:nvector,iu1:iu2,ju1:ju2,ku1:ku2)::c  
 
   integer ::i, j, k, l, n, idim, irad
-  real(dp)::eint, smalle, dtxhalf, oneoverrho
+  real(dp)::eint, smalle, smalle_poly, dtxhalf, oneoverrho
   real(dp)::eken, erad
 
   smalle = smallc**2/gamma/(gamma-one)
@@ -918,17 +918,28 @@ subroutine ctoprim(uin,q,c,gravin,dt,ngrid)
                  erad = erad+uin(l,i,j,k,ndim+2+irad)*oneoverrho
               enddo
 #endif
-              ! Compute thermal pressure
-              eint = MAX(uin(l,i,j,k,ndim+2)*oneoverrho-eken-erad,smalle)
+              ! Compute thermal pressure with polytropic floor (eEOS)
+              smalle_poly = smalle
+              if(eeos_poly_coeff > 0d0) then
+                 smalle_poly = max(smalle, eeos_poly_coeff * q(l,i,j,k,1)**(eeos_poly_alpha-1d0))
+              end if
+              eint = MAX(uin(l,i,j,k,ndim+2)*oneoverrho-eken-erad, smalle_poly)
+              ! Write back floored energy to conserved variable for consistency
+              uin(l,i,j,k,ndim+2) = q(l,i,j,k,1)*(eint+eken+erad)
               q(l,i,j,k,ndim+2) = (gamma-one)*q(l,i,j,k,1)*eint
 
-              ! Compute sound speed
+              ! Compute sound speed (c_eff includes SGS turbulent pressure)
               c(l,i,j,k)=gamma*q(l,i,j,k,ndim+2)
 #if NENER>0
               do irad=1,nener
                  c(l,i,j,k)=c(l,i,j,k)+gamma_rad(irad)*q(l,i,j,k,ndim+2+irad)
               enddo
 #endif
+              if(use_sgs .and. sgs_hydro .and. isgs>0) then
+                 ! BUG FIX: q(isgs) not yet set (passive scalars converted below)
+                 ! Use uin(isgs) directly: uin(isgs) = rho*e_sgs, c is rho*c^2
+                 c(l,i,j,k)=c(l,i,j,k)+(2d0/3d0)*max(uin(l,i,j,k,isgs),0d0)
+              end if
               c(l,i,j,k)=sqrt(c(l,i,j,k)*oneoverrho)
 
               ! Gravity predictor step
