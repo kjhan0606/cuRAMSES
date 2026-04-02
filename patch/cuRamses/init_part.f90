@@ -106,7 +106,15 @@ subroutine init_part
         allocate(zp(npartmax))
      end if
 
+  end if
 
+  ! Atomic Dark Matter: dark internal energy per particle
+  if(use_adm) then
+     allocate(edp(npartmax))
+     ! edp: zero-initialized by mmap lazy pages
+  end if
+
+  if(star.or.sink)then
      !Read the yield table
      open(33,file=trim(yieldtablefilename),status='old', form='formatted')
      read(33,'(a8,I10)')a1,nmetal
