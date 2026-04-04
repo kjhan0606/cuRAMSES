@@ -314,7 +314,7 @@ subroutine init_part
      nDMloc=0
      if(star .or. sink) then
         do i = 1, npart2
-           if(idp(i)>0.and.tp(i)==0.) then 
+           if(idp(i)>0.and.tp(i)<=0.) then
               nDMloc=nDMloc+1
            endif
         enddo
@@ -1192,7 +1192,7 @@ subroutine restore_part_binary_varcpu
   nDMloc = 0
   if(star .or. sink) then
      do i = 1, npart
-        if(idp(i) > 0 .and. tp(i) == 0.) nDMloc = nDMloc + 1
+        if(idp(i) > 0 .and. tp(i) <= 0.) nDMloc = nDMloc + 1
      end do
   else
      nDMloc = npart

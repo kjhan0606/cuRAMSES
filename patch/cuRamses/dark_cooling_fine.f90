@@ -79,8 +79,8 @@ subroutine sub_dark_cooling_fine(ilevel, igrid_start, ngrid)
   do i = 1, ngrid
      ipart = headp(ind_grid(i))
      do jpart = 1, numbp(ind_grid(i))
-        ! Only DM particles (idp > 0, tp == 0 means not a star)
-        if(idp(ipart) > 0 .and. tp(ipart) == 0.0d0) then
+        ! Only DM particles (idp > 0, tp <= 0: ground or excited state)
+        if(idp(ipart) > 0 .and. tp(ipart) <= 0.0d0) then
            ! Particle physical mass [g]
            ! In RAMSES: mp [code] = rho * vol in code units
            ! mp_phys = mp * scale_d * scale_l^3
