@@ -4,6 +4,7 @@ subroutine adaptive_loop
   use pm_commons
   use poisson_commons
   use cooling_module
+  use ksection, only: ksection_trim_done
 #ifdef RT
   use rt_hydro_commons
 #endif
@@ -63,6 +64,7 @@ subroutine adaptive_loop
        & call rt_init_hydro          ! Initialize radiation variables
 #endif
   if(poisson)call init_poisson       ! Initialize poisson variables
+  if(use_fdm)call fdm_compute_hbar   ! Compute effective hbar in code units
 #ifdef ATON
   if(aton)call init_radiation        ! Initialize radiation variables
 #endif
@@ -79,6 +81,9 @@ subroutine adaptive_loop
   if(pic)call init_part              ! Initialize particle variables
   if(pic)call init_tree              ! Initialize particle tree
   if(nrestart==0)call init_refine_2  ! Build initial AMR grid again
+
+  ! Initialize FDM wavefunction (after AMR grid and density are set)
+  if(use_fdm .and. nrestart==0) call fdm_init_psi
 
   ! Rebuild Morton hash tables after full AMR grid is available
   if(nrestart==0) call morton_hash_build_and_verify()
@@ -148,6 +153,8 @@ subroutine adaptive_loop
            end if
            if(ilevel<levelmin)call refine_fine(ilevel)
         end do
+        ! Clear trim flag after exchange routines have processed it
+        call ksection_trim_done()
      endif
 
      ! Call base level
@@ -295,6 +302,8 @@ subroutine adaptive_loop
         if(sidm .and. sidm_inelastic) then
            call sidm_report_excited_fraction()
         end if
+        ! FDM diagnostics (must be outside myid==1 for MPI_ALLREDUCE)
+        if(use_fdm) call fdm_diagnostics()
         ! SGS turbulence diagnostics
         if(use_sgs .and. isgs>0) then
            ! Collect local SGS statistics over leaf cells at levelmin
