@@ -866,12 +866,13 @@ subroutine virtual_tree_fine(ilevel)
   end do
 
   ! Calculate how many particle properties are being transferred
-  particle_data_width = twondim+1
+  ! Base: twondim (xp,vp) + 1 (mp) + 1 (ptypep)
+  particle_data_width = twondim+2
   if(star.or.sink) then
      if(metal) then
-        particle_data_width=twondim+6+nelt
+        particle_data_width=particle_data_width+5+nelt
      else
-        particle_data_width=twondim+5+nelt
+        particle_data_width=particle_data_width+4+nelt
      endif
   endif
 
@@ -1099,6 +1100,12 @@ subroutine fill_comm(ind_part,ind_com,ind_list,np,ilevel,icpu)
   end do
   current_property = current_property+1
 
+  ! Gather particle type (cast int1 -> dp for transport)
+  do i=1,np
+     reception(icpu,ilevel)%up(ind_com(i),current_property)=dble(ptypep(ind_part(i)))
+  end do
+  current_property = current_property+1
+
 #ifdef OUTPUT_PARTICLE_POTENTIAL
   ! Gather particle potential
   do i=1,np
@@ -1188,6 +1195,12 @@ subroutine empty_comm(ind_com,np,ilevel,icpu)
   ! Scatter particle mass
   do i=1,np
      mp(ind_part(i))=emission(icpu,ilevel)%up(ind_com(i),current_property)
+  end do
+  current_property = current_property+1
+
+  ! Scatter particle type (cast dp -> int1)
+  do i=1,np
+     ptypep(ind_part(i))=int(nint(emission(icpu,ilevel)%up(ind_com(i),current_property)),kind=1)
   end do
   current_property = current_property+1
 

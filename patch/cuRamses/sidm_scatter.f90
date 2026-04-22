@@ -196,6 +196,7 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
   ! Anisotropic scattering variables
   real(dp)::eps2,a_ruth,b_ruth,e1_mag
   real(dp),dimension(1:3)::v_hat,e1,e2
+  logical::yukawa_angular  ! velocity-dependent angular distribution
 
   ! Inelastic scattering variables
   real(dp)::mu,KE_cm,KE_cm_new,delta_KE,v_rel_new_mag
@@ -230,11 +231,13 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
   !  and converted to erg inline: E [erg] = E [keV] * 1.602d-9)
 
   ! Precompute Rutherford parameters
+  yukawa_angular = (trim(sidm_angular) == 'yukawa')
   if(trim(sidm_angular) == 'rutherford') then
      eps2 = 2.0d0*sidm_epsilon
      a_ruth = 1.0d0/eps2
      b_ruth = 1.0d0/(2.0d0+eps2)
   end if
+  ! For 'yukawa' angular: eps2, a_ruth, b_ruth computed per pair below
 
   ! Use per-thread seed from thread_seeds array
   seed_loc = thread_seeds(:,mythread_loc)
@@ -269,13 +272,13 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
         if(son(icell)/=0) cycle
 
         ! Collect DM particles in this subcell
-        ! DM: idp>0 and tp<=0 (ground: tp=0, excited: tp=-1)
+        ! DM-like: idp>0 and ptypep is DM or excited iSIDM (not star, not sink)
         ndm_cell = 0
         ipart = headp(igrid)
         do jp=1,npart1
            ! Check if this particle belongs to subcell 'ind'
            if(cell_index_from_part(ipart,igrid,ilevel)==ind) then
-              if(idp(ipart)>0 .and. tp(ipart)<=0.0d0) then
+              if(idp(ipart)>0 .and. ptypep(ipart)/=PTYPE_STAR .and. ptypep(ipart)/=PTYPE_SINK) then
                  ndm_cell = ndm_cell+1
                  if(ndm_cell<=nvector) ind_dm(ndm_cell) = ipart
               end if
@@ -397,9 +400,9 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
            new_state_1 = 0
            new_state_2 = 0
            if(sidm_inelastic) then
-              ! Current states: tp=0 -> state 0, tp=-1 -> state 1, tp=-2 -> state 2, etc.
-              istate_1 = nint(-tp(ind_dm(ipair)))
-              istate_2 = nint(-tp(ind_dm(ipair+1)))
+              ! Current states: derived from ptypep (PTYPE_DM=0, ISIDM_EX1=1, ISIDM_EX2=2)
+              istate_1 = ptype_to_isidm_state(ptypep(ind_dm(ipair)))
+              istate_2 = ptype_to_isidm_state(ptypep(ind_dm(ipair+1)))
               istate_1 = max(0, min(istate_1, sidm_nstates-1))
               istate_2 = max(0, min(istate_2, sidm_nstates-1))
               Ei_1 = sidm_energy(istate_1) * 1.602d-9  ! keV -> erg
@@ -458,9 +461,19 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
            end if
 
            ! --- Scattering angle ---
+           if(yukawa_angular) then
+              ! Yukawa Born: dsigma/dOmega ~ 1/(1+R^2*sin^2(theta/2))^2
+              ! equivalent to Rutherford with eps = v0^2/v_rel^2
+              ! R = v_rel/v0 (physical km/s)
+              eps2 = 2.0d0*sidm_v0**2/max(v_rel_kms**2, 1.0d0)
+              a_ruth = 1.0d0/eps2
+              b_ruth = 1.0d0/(2.0d0+eps2)
+           end if
+
            select case(trim(sidm_angular))
-           case('rutherford')
+           case('rutherford','yukawa')
               ! Rutherford-like: dsigma/dOmega ~ 1/(1-cos_theta+2*eps)^2
+              ! For 'yukawa': eps = v0^2/v_rel^2 (velocity-dependent)
               ! CDF inversion: cos_theta = 1+2*eps - 1/(b + R*(a-b))
               call ranf(seed_loc, R1)
               call ranf(seed_loc, R2)
@@ -514,8 +527,8 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
 
            ! Apply state transitions (multi-state iSIDM)
            if(do_transition) then
-              tp(ind_dm(ipair))   = -dble(new_state_1)
-              tp(ind_dm(ipair+1)) = -dble(new_state_2)
+              ptypep(ind_dm(ipair))   = isidm_state_to_ptype(new_state_1)
+              ptypep(ind_dm(ipair+1)) = isidm_state_to_ptype(new_state_2)
            end if
 
            ! Conservation diagnostics (momentum: exact, energy: exact
@@ -596,14 +609,14 @@ subroutine sidm_init_excited()
      cum_prob = cum_prob / cum_prob(sidm_nstates-1)
   end if
 
-  ! Check if already initialized (restart case: some DM have tp<0)
+  ! Check if already initialized (restart case: some DM have excited ptype)
   ndm_existing = 0
   do ilevel=levelmin,nlevelmax
      igrid = headl(myid,ilevel)
      do jgrid=1,numbl(myid,ilevel)
         ipart = headp(igrid)
         do jpart=1,numbp(igrid)
-           if(idp(ipart)>0 .and. tp(ipart)<-0.5d0) then
+           if(idp(ipart)>0 .and. (ptypep(ipart)==PTYPE_ISIDM_EX1 .or. ptypep(ipart)==PTYPE_ISIDM_EX2)) then
               ndm_existing = ndm_existing + 1
            end if
            ipart = nextp(ipart)
@@ -633,14 +646,14 @@ subroutine sidm_init_excited()
      do jgrid=1,numbl(myid,ilevel)
         ipart = headp(igrid)
         do jpart=1,numbp(igrid)
-           ! DM: idp>0, tp==0 (ground state, not yet assigned)
-           if(idp(ipart)>0 .and. tp(ipart)==0.0d0) then
+           ! DM: idp>0, ptypep==PTYPE_DM (ground state, not yet assigned)
+           if(idp(ipart)>0 .and. ptypep(ipart)==PTYPE_DM) then
               ndm_total = ndm_total + 1
               call ranf(seed_init, R1)
               ! Assign state by cumulative probability
               do is=0,sidm_nstates-1
                  if(R1 < cum_prob(is)) then
-                    tp(ipart) = -dble(is)  ! state 0 -> tp=0, state 1 -> tp=-1, etc.
+                    ptypep(ipart) = isidm_state_to_ptype(is)
                     ndm_state(is) = ndm_state(is) + 1
                     exit
                  end if
@@ -715,9 +728,9 @@ subroutine sidm_report_excited_fraction()
      do jgrid=1,numbl(myid,ilevel)
         ipart = headp(igrid)
         do jpart=1,numbp(igrid)
-           if(idp(ipart)>0 .and. tp(ipart)<=0.0d0) then
+           if(idp(ipart)>0 .and. ptypep(ipart)/=PTYPE_STAR .and. ptypep(ipart)/=PTYPE_SINK) then
               ndm_total = ndm_total + 1
-              istate = nint(-tp(ipart))
+              istate = ptype_to_isidm_state(ptypep(ipart))
               istate = max(0, min(istate, 9))
               ndm_state(istate) = ndm_state(istate) + 1
            end if
@@ -826,8 +839,8 @@ subroutine sidm_baryon_drag(ilevel)
         ! Loop over particles in this grid
         ipart = headp(igrid)
         do jpart=1,npart1
-           ! DM only (idp>0, tp<=0 for non-stars)
-           if(idp(ipart)>0 .and. tp(ipart)<=0.0d0) then
+           ! DM only (idp>0, ptypep is DM or excited iSIDM)
+           if(idp(ipart)>0 .and. ptypep(ipart)/=PTYPE_STAR .and. ptypep(ipart)/=PTYPE_SINK) then
               ! Check subcell match
               if(cell_index_from_part_inline(ipart,igrid)==ind) then
                  ! DM velocity (physical)

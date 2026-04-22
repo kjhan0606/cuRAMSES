@@ -367,7 +367,7 @@ subroutine sub_userflag_fine(ilevel,skip_loc,scale, igrid,ngrid,iflag)
      do i=1,ngrid
         ipart = headp(ind_grid(i))
         do while(ipart > 0)
-           if(idp(ipart) < 0 .and. tp(ipart) == 0d0)then
+           if(ptypep(ipart) == PTYPE_SINK)then
               ! Determine child cell index (1..8) from particle position
               ind_part = 1
               if(xp(ipart,1) > xg(ind_grid(i),1)) ind_part = ind_part + 1

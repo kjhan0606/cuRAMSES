@@ -532,6 +532,7 @@ subroutine cic_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
   real(dp),dimension(1:nvector),save::mmm
   real(dp),dimension(1:nvector),save::ttt=0d0
   integer(i8b) ,dimension(1:nvector),save::iii=0
+  integer(kind=1),dimension(1:nvector),save::pt_arr=PTYPE_DM
   real(dp),dimension(1:nvector),save::vol2
   real(dp),dimension(1:nvector,1:ndim),save::x,dd,dg
   integer ,dimension(1:nvector,1:ndim),save::ig,id,igg,igd,icg,icd
@@ -546,6 +547,7 @@ subroutine cic_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
   real(dp),dimension(1:nvector)::mmm
   real(dp),dimension(1:nvector)::ttt
   integer(i8b) ,dimension(1:nvector)::iii
+  integer(kind=1),dimension(1:nvector)::pt_arr
   real(dp),dimension(1:nvector)::vol2
   real(dp),dimension(1:nvector,1:ndim)::x,dd,dg
   integer ,dimension(1:nvector,1:ndim)::ig,id,igg,igd,icg,icd
@@ -605,12 +607,11 @@ subroutine cic_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
   end if
 
 
-  ! Initialize ttt and iii (avoid implicit SAVE with OpenMP)
+  ! Initialize ttt, iii, pt_arr (avoid implicit SAVE with OpenMP)
   do j=1,nvector
      ttt(j)=0d0
-  end do
-  do j=1,nvector
      iii(j)=0
+     pt_arr(j)=PTYPE_DM
   end do
   ! Gather particle birth epoch
   if(star)then
@@ -624,6 +625,10 @@ subroutine cic_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
     iii(j)=idp(ind_part(j))
      end do
   endif
+  ! Gather particle type
+  do j=1,np
+     pt_arr(j)=ptypep(ind_part(j))
+  end do
 
   ! Check for illegal moves
   error=.false.
@@ -783,13 +788,13 @@ subroutine cic_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
      else if(ilevel>cic_levelmax)then
     if(sink)then
        do j=1,np
-          if(ok(j).and. ( ttt(j)>0d0 .or. iii(j).lt.0 ))then
+          if(ok(j).and. ( pt_arr(j)==PTYPE_STAR .or. pt_arr(j)==PTYPE_SINK ))then
          rho(indp(j,ind))=rho(indp(j,ind))+vol2(j)
           endif
        enddo
     else
        do j=1,np
-          if(ok(j).and.ttt(j)>0d0)then
+          if(ok(j).and.pt_arr(j)==PTYPE_STAR)then
          rho(indp(j,ind))=rho(indp(j,ind))+vol2(j)
           end if
        enddo
@@ -799,13 +804,13 @@ subroutine cic_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
      if(ilevel==cic_levelmax)then
     if(sink)then
        do j=1,np
-          if(ok(j).and.(ttt(j)<=0d0.and.iii(j).ge.0))then
+          if(ok(j).and.pt_arr(j)/=PTYPE_STAR.and.pt_arr(j)/=PTYPE_SINK)then
          rho_top(indp(j,ind))=rho_top(indp(j,ind))+vol2(j)
           end if
        enddo
     else
        do j=1,np
-          if(ok(j).and.ttt(j)<=0d0)then
+          if(ok(j).and.pt_arr(j)/=PTYPE_STAR)then
          rho_top(indp(j,ind))=rho_top(indp(j,ind))+vol2(j)
           end if
        end do
@@ -827,13 +832,13 @@ subroutine cic_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
      if(mass_cut_refine>0.0)then
     if(sink)then
        do j=1,np
-          if(ttt(j)<=0d0.and.iii(j).ge.0)then
+          if(pt_arr(j)/=PTYPE_STAR.and.pt_arr(j)/=PTYPE_SINK)then
          ok(j)=ok(j).and.mmm(j)<mass_cut_refine
           endif
        end do
     else
        do j=1,np
-          if(ttt(j)<=0d0)then
+          if(pt_arr(j)/=PTYPE_STAR)then
          ok(j)=ok(j).and.mmm(j)<mass_cut_refine
           endif
        end do
@@ -844,13 +849,13 @@ subroutine cic_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
      if(star)then
     if(sink)then
        do j=1,np
-          if(ttt(j)>0.0 .or. iii(j).lt.0)then
+          if(pt_arr(j)==PTYPE_STAR .or. pt_arr(j)==PTYPE_SINK)then
          vol2(j)=vol2(j)*mmm(j)/mass_sph
           endif
        end do
     else
        do j=1,np
-          if(ttt(j)>0.0)then
+          if(pt_arr(j)==PTYPE_STAR)then
          vol2(j)=vol2(j)*mmm(j)/mass_sph
           endif
        end do
@@ -867,13 +872,13 @@ subroutine cic_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
      else if(ilevel>=cic_levelmax)then
     if(sink)then
        do j=1,np
-          if(ok(j).and. ( ttt(j)>0d0 .or. iii(j).lt.0 ))then
+          if(ok(j).and. ( pt_arr(j)==PTYPE_STAR .or. pt_arr(j)==PTYPE_SINK ))then
          phi(indp(j,ind))=phi(indp(j,ind))+vol2(j)
           endif
        enddo
     else
        do j=1,np
-          if(ok(j).and.ttt(j)>0d0)then
+          if(ok(j).and.pt_arr(j)==PTYPE_STAR)then
          phi(indp(j,ind))=phi(indp(j,ind))+vol2(j)
           end if
        enddo
@@ -884,7 +889,7 @@ subroutine cic_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
      ! by setting particle number density above m_refine_eff(ilevel)
      if(sink_refine)then
         do j=1,np
-           if(ttt(j).eq.0d0.and.iii(j).lt.0)then
+           if(pt_arr(j)==PTYPE_SINK)then
               phi(indp(j,ind))=phi(indp(j,ind))+m_refine_eff(ilevel)
            end if
         end do
@@ -1617,6 +1622,7 @@ subroutine tsc_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
   logical ,dimension(1:nvector)::ok,abandoned
   real(dp),dimension(1:nvector)::mmm
   real(dp),dimension(1:nvector)::ttt
+  integer(kind=1),dimension(1:nvector)::pt_arr
   real(dp),dimension(1:nvector)::vol2
   real(dp),dimension(1:nvector,1:ndim)::x,cl,cr,cc,wl,wr,wc
   integer ,dimension(1:nvector,1:ndim)::igl,igr,igc,icl,icr,icc
@@ -1678,13 +1684,10 @@ subroutine tsc_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
      end do
   end if
 
-  ! Initialize ttt (avoid implicit SAVE with OpenMP)
+  ! Initialize ttt, pt_arr (avoid implicit SAVE with OpenMP)
   do j=1,nvector
      ttt(j)=0d0
-  end do
-  ! Initialize ttt (avoid undefined values for non-star particles)
-  do j=1,nvector
-     ttt(j)=0d0
+     pt_arr(j)=PTYPE_DM
   end do
   ! Gather particle birth epoch
   if(star)then
@@ -1692,6 +1695,10 @@ subroutine tsc_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
         ttt(j)=tp(ind_part(j))
      end do
   endif
+  ! Gather particle type
+  do j=1,np
+     pt_arr(j)=ptypep(ind_part(j))
+  end do
 
   ! Check for illegal moves
   abandoned(1:np)=.false.
@@ -1876,7 +1883,7 @@ subroutine tsc_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
         end do
      else if(ilevel>cic_levelmax) then
         do j=1,np
-           if(ok(j).and.(ttt(j)>0d0).and.(.not.abandoned(j))) then
+           if(ok(j).and.(pt_arr(j)==PTYPE_STAR).and.(.not.abandoned(j))) then
               rho(indp(j,ind))=rho(indp(j,ind))+vol2(j)
            end if
         end do
@@ -1884,7 +1891,7 @@ subroutine tsc_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
 
      if(ilevel==cic_levelmax)then
         do j=1,np
-           if(ok(j).and.(ttt(j)<=0d0).and.(.not.abandoned(j)))then
+           if(ok(j).and.(pt_arr(j)/=PTYPE_STAR).and.(.not.abandoned(j)))then
               rho_top(indp(j,ind))=rho_top(indp(j,ind))+vol2(j)
            end if
         end do
@@ -1908,7 +1915,7 @@ subroutine tsc_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
      ! Remove massive dark matter particle
      if(mass_cut_refine>0.0) then
         do j=1,np
-           if(ttt(j)<=0d0.and.(.not.abandoned(j))) then
+           if(pt_arr(j)/=PTYPE_STAR.and.(.not.abandoned(j))) then
               ok(j)=ok(j).and.mmm(j)<mass_cut_refine
            endif
         end do
@@ -1917,7 +1924,7 @@ subroutine tsc_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
      ! For low mass baryon particles
      if(star) then
         do j=1,np
-           if(ttt(j)>0.0.and.(.not.abandoned(j))) then
+           if(pt_arr(j)==PTYPE_STAR.and.(.not.abandoned(j))) then
               vol2(j)=vol2(j)*mmm(j)/mass_sph
            endif
         end do
@@ -1931,7 +1938,7 @@ subroutine tsc_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
         end do
      else if(ilevel>=cic_levelmax) then
         do j=1,np
-           if(ok(j).and.(ttt(j)>0d0).and.(.not.abandoned(j))) then
+           if(ok(j).and.(pt_arr(j)==PTYPE_STAR).and.(.not.abandoned(j))) then
               phi(indp(j,ind))=phi(indp(j,ind))+vol2(j)
            end if
         end do

@@ -376,6 +376,7 @@ subroutine star_formation(ilevel)
 
            ! Set star particle variables
            tp(ind_part(i))=birth_epoch  ! Birth epoch
+           ptypep(ind_part(i))=PTYPE_STAR  ! Mark as star
            mp(ind_part(i))=n*mstar      ! Mass
            levelp(ind_part(i))=ilevel   ! Level
            idp(ind_part(i))=index_star  ! Star identity

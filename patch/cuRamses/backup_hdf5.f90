@@ -615,6 +615,17 @@ subroutine backup_part_hdf5()
   call hdf5_write_dataset_1d_int(grp_id, 'levelp', &
        ibuf, npart_loc, offset_part, npart_total)
 
+  ! Particle type (stored as int4 for simplicity)
+  ipart = 0
+  do i = 1, npartmax
+     if(levelp(i) > 0) then
+        ipart = ipart + 1
+        ibuf(ipart) = int(ptypep(i))
+     end if
+  end do
+  call hdf5_write_dataset_1d_int(grp_id, 'ptypep', &
+       ibuf, npart_loc, offset_part, npart_total)
+
   ! Birth epoch (tp) and metallicity (zp)
   if(star .or. sink) then
      ipart = 0

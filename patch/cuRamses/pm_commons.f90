@@ -34,7 +34,7 @@ module pm_commons
 #ifdef OUTPUT_PARTICLE_POTENTIAL
   real(dp),allocatable,dimension(:)  ::ptcl_phi ! Potential of particle added by AP for output purposes 
 #endif
-  real(dp),allocatable,dimension(:)  ::tp       ! Birth epoch
+  real(dp),allocatable,dimension(:)  ::tp       ! Birth epoch (pure data; type in ptypep)
   real(dp),allocatable,dimension(:,:)::weightp  ! weight of cloud parts for sink accretion only
   real(dp),allocatable,dimension(:)  ::zp       ! Birth metallicity
   real(dp),allocatable,dimension(:)  ::edp      ! Dark internal energy (aDM)
@@ -42,6 +42,15 @@ module pm_commons
   integer ,allocatable,dimension(:)  ::prevp    ! Previous particle in list
   integer ,allocatable,dimension(:)  ::levelp   ! Current level of particle
   integer(i8b),allocatable,dimension(:)::idp    ! Identity of particle
+  integer(kind=1),allocatable,dimension(:)::ptypep  ! Particle type code (see PTYPE_* below)
+
+  ! Particle type codes — authoritative species tag for each particle
+  integer(kind=1),parameter::PTYPE_DM        =  0_1  ! cold DM (ground state)
+  integer(kind=1),parameter::PTYPE_STAR      =  1_1  ! stellar particle
+  integer(kind=1),parameter::PTYPE_SINK      =  2_1  ! BH sink cloud particle (idp<0)
+  integer(kind=1),parameter::PTYPE_ISIDM_EX1 = 10_1  ! iSIDM excited state 1
+  integer(kind=1),parameter::PTYPE_ISIDM_EX2 = 11_1  ! iSIDM excited state 2 (multi-state)
+  integer(kind=1),parameter::PTYPE_ADM       = 20_1  ! atomic DM
 
   ! Tree related arrays
   integer ,allocatable,dimension(:)  ::headp    ! Head particle in grid
@@ -81,5 +90,28 @@ module pm_commons
     cross(2)=a(3)*b(1)-a(1)*b(3)
     cross(3)=a(1)*b(2)-a(2)*b(1)
   end function cross
-  
+
+  ! iSIDM state index <-> ptype mapping
+  function isidm_state_to_ptype(istate) result(pt)
+    integer, intent(in) :: istate
+    integer(kind=1) :: pt
+    select case(istate)
+    case(0);  pt = PTYPE_DM
+    case(1);  pt = PTYPE_ISIDM_EX1
+    case(2);  pt = PTYPE_ISIDM_EX2
+    case default; pt = PTYPE_DM
+    end select
+  end function isidm_state_to_ptype
+
+  function ptype_to_isidm_state(pt) result(istate)
+    integer(kind=1), intent(in) :: pt
+    integer :: istate
+    select case(pt)
+    case(PTYPE_DM);        istate = 0
+    case(PTYPE_ISIDM_EX1); istate = 1
+    case(PTYPE_ISIDM_EX2); istate = 2
+    case default;          istate = -1
+    end select
+  end function ptype_to_isidm_state
+
 end module pm_commons

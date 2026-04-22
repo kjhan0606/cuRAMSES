@@ -1,111 +1,72 @@
-subroutine synchro_fine(ilevel)
-  use pm_commons
+subroutine move_fine(ilevel)
   use amr_commons
+  use pm_commons
   implicit none
 #ifndef WITHOUTMPI
   include 'mpif.h' 
 #endif
   integer::ilevel
-  !--------------------------------------------------------------------
-  ! This routine synchronizes particle velocity with particle
-  ! position for ilevel particle only. If particle sits entirely 
-  ! in level ilevel, then use inverse CIC at fine level to compute 
-  ! the force. Otherwise, use coarse level force and coarse level CIC.
-  !--------------------------------------------------------------------
-  integer::igrid,jgrid,ipart,jpart
-  integer::ig,ip,npart1,isink,info
-  integer::npack,ip_buf,idim
-  real(dp),allocatable,dimension(:)::sink_sbuf,sink_rbuf
-  integer, dimension(:), allocatable:: nparticles, ptrhead
-  integer mythread, nthreads,nwork,icount,jcount,npart3,subnump
-  common /openmpthreads_sf/ mythread
-!$omp threadprivate(/openmpthreads_sf/)
-  call MPI_BARRIER(MPI_COMM_WORLD,info)
+  !----------------------------------------------------------------------
+  ! Update particle position and time-centred velocity at level ilevel. 
+  ! If particle sits entirely in level ilevel, then use fine grid force
+  ! for CIC interpolation. Otherwise, use coarse grid (ilevel-1) force.
+  !----------------------------------------------------------------------
+  integer::igrid,jgrid,ipart,jpart,next_part,ig,ip,npart1,info,isink
 
-  if(numbtot(1,ilevel)==0)return
-  if(verbose)write(*,111)ilevel
-#ifdef _OPENMP
+#ifndef _OPENMP
+  integer,dimension(1:nvector)::ind_grid,ind_part,ind_grid_part
+#else
+  integer,target, allocatable::Pind_grid(:,:),Pind_part(:,:),Pind_grid_part(:,:)
+  integer,pointer :: ind_grid(:),ind_part(:),ind_grid_part(:)
+  integer, dimension(:), allocatable:: nparticles, ptrhead
+  integer:: nthreads,mythread,npart3
+  common /move_fine_threads/ mythread
+!$omp threadprivate(/move_fine_threads/)
+  common /omp_move_fine_c/ ind_grid, ind_grid_part, ind_part
+!$omp threadprivate(/omp_move_fine_c/)
+
 !$omp parallel shared(nthreads)
   mythread = omp_get_thread_num()
   if(mythread.eq.0) nthreads = omp_get_num_threads()
 !$omp end parallel
-  allocate(ptrhead(0:nthreads-1), nparticles(0:nthreads-1))
+  allocate(nparticles(0:nthreads-1), ptrhead(0:nthreads-1))
+  allocate(Pind_grid(1:nvector,0:nthreads-1))
+  allocate(Pind_part(1:nvector,0:nthreads-1))
+  allocate(Pind_grid_part(1:nvector,0:nthreads-1))
+!$omp parallel
+  ind_grid => Pind_grid(:, mythread)
+  ind_part => Pind_part(:, mythread)
+  ind_grid_part => Pind_grid_part(:, mythread)
+!$omp end parallel
 #endif
 
+
+  if(numbtot(1,ilevel)==0)return
+  if(verbose)write(*,111)ilevel
 
   ! Set new sink variables to old ones
   if(sink)then
-     vsink_new=0d0; oksink_new=0d0
+     vsink_new=0d0
+     oksink_new=0d0
+     sink_stat(:,ilevel,:)=0d0
   endif
 
-  ! Loop over grids
-  call pthreadLinkedList(headl(myid,ilevel),numbl(myid,ilevel),nthreads,nparticles,ptrhead,next)
-!$omp parallel private(subnump,igrid)
-  subnump = nparticles(mythread)
-  igrid = ptrhead(mythread)
-  call sub_synchro_fine(ilevel, igrid,subnump)
-!$omp end parallel
-  deallocate(ptrhead, nparticles)
-  if(sink)then
-     if(nsink>0)then
-#ifndef WITHOUTMPI
-        npack = (1+ndim)*nsink
-        allocate(sink_sbuf(1:npack), sink_rbuf(1:npack))
-        ip_buf = 0
-        sink_sbuf(ip_buf+1:ip_buf+nsink) = oksink_new(1:nsink); ip_buf = ip_buf + nsink
-        do idim=1,ndim
-           sink_sbuf(ip_buf+1:ip_buf+nsink) = vsink_new(1:nsink,idim); ip_buf = ip_buf + nsink
-        end do
-        call MPI_ALLREDUCE(sink_sbuf, sink_rbuf, npack, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, info)
-        ip_buf = 0
-        oksink_all=0d0; vsink_all=0d0
-        oksink_all(1:nsink) = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
-        do idim=1,ndim
-           vsink_all(1:nsink,idim) = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
-        end do
-        deallocate(sink_sbuf, sink_rbuf)
-#else
-        oksink_all=oksink_new
-        vsink_all=vsink_new
-#endif
-     endif
-     do isink=1,nsink
-        if(oksink_all(isink)==1d0)then
-           vsink(isink,1:ndim)=vsink_all(isink,1:ndim)
-        endif
-     end do
-  endif
-  
-  call MPI_BARRIER(MPI_COMM_WORLD,info)
-  if(verbose)write(*,111)ilevel
-
-111 format('  +Entering synchro_fine for level ',I2)
-end subroutine synchro_fine
-
-subroutine sub_synchro_fine(ilevel, kgrid,subnump)
-  use pm_commons
-  use amr_commons
-  implicit none
-#ifndef WITHOUTMPI
-  include 'mpif.h' 
-#endif
-  integer::ilevel,subnump,kgrid
-  !--------------------------------------------------------------------
-  ! This routine synchronizes particle velocity with particle
-  ! position for ilevel particle only. If particle sits entirely 
-  ! in level ilevel, then use inverse CIC at fine level to compute 
-  ! the force. Otherwise, use coarse level force and coarse level CIC.
-  !--------------------------------------------------------------------
-  integer::igrid,jgrid,ipart,jpart
-  integer::ig,ip,npart1,isink,info
-  integer,dimension(1:nvector)::ind_grid,ind_part,ind_grid_part
-
-  igrid = kgrid
-  ! Synchronize velocity using CIC
+#ifdef _OPENMP
+  call pthreadLinkedList(headl(myid,ilevel), numbl(myid,ilevel), nthreads,nparticles, ptrhead, next)
+  ! Update particles position and velocity
+!$omp parallel private(igrid,jgrid,npart1,npart3, ipart, next_part, jpart,ip,ig)
   ig=0
   ip=0
+  npart3 = nparticles(mythread)
+  igrid = ptrhead(mythread)
+  do jgrid= 1, npart3
+#else
   ! Loop over grids
-  do jgrid=1,subnump
+  igrid=headl(myid,ilevel)
+  ig = 0
+  ip = 0
+  do jgrid=1,numbl(myid,ilevel)
+#endif
      npart1=numbp(igrid)  ! Number of particles in the grid
      if(npart1>0)then        
         ig=ig+1
@@ -113,6 +74,8 @@ subroutine sub_synchro_fine(ilevel, kgrid,subnump)
         ipart=headp(igrid)
         ! Loop over particles
         do jpart=1,npart1
+           ! Save next particle  <---- Very important !!!
+           next_part=nextp(ipart)
            if(ig==0)then
               ig=1
               ind_grid(ig)=igrid
@@ -121,72 +84,103 @@ subroutine sub_synchro_fine(ilevel, kgrid,subnump)
            ind_part(ip)=ipart
            ind_grid_part(ip)=ig   
            if(ip==nvector)then
-              call sync(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+              call move1(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
               ip=0
               ig=0
            end if
-           ipart=nextp(ipart)  ! Go to next particle
+           ipart=next_part  ! Go to next particle
         end do
         ! End loop over particles
      end if
      igrid=next(igrid)   ! Go to next grid
   end do
   ! End loop over grids
-  if(ip>0)call sync(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
-  
+  if(ip>0)call move1(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+#ifdef _OPENMP
+!$omp end parallel
+  deallocate(nparticles, ptrhead)
+  deallocate(Pind_part, Pind_grid,Pind_grid_part)
+#endif
 
-end subroutine sub_synchro_fine
-!####################################################################
-!####################################################################
-!####################################################################
-!####################################################################
-subroutine sync(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
+  if(sink)then
+     if(nsink>0)then
+#ifndef WITHOUTMPI
+        call MPI_ALLREDUCE(oksink_new,oksink_all,nsinkmax     ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+        call MPI_ALLREDUCE(vsink_new ,vsink_all ,nsinkmax*ndim,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+#else
+        oksink_all=oksink_new
+        vsink_all=vsink_new
+#endif
+     endif
+!$omp parallel do private(isink)
+     do isink=1,nsink
+        if(oksink_all(isink)==1d0)then
+           vsink(isink,1:ndim)=vsink_all(isink,1:ndim)
+           xsink(isink,1:ndim)=xsink(isink,1:ndim)+vsink(isink,1:ndim)*dtnew(ilevel)
+        endif
+     end do
+  endif
+  
+111 format('  +Entering move_fine for level ',I2)
+
+end subroutine move_fine
+!#########################################################################
+!#########################################################################
+!#########################################################################
+!#########################################################################
+subroutine move1(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
   use amr_commons
   use pm_commons
   use poisson_commons
+  use hydro_commons, ONLY: uold,smallr,gamma
   use cooling_module, ONLY: XH=>X, rhoc, mH 
   implicit none
   integer::ng,np,ilevel
   integer,dimension(1:nvector)::ind_grid
   integer,dimension(1:nvector)::ind_grid_part,ind_part
-  !
-  !
-  !
+  !------------------------------------------------------------
+  ! This routine computes the force on each particle by
+  ! inverse CIC and computes new positions for all particles.
+  ! If particle sits entirely in fine level, then CIC is performed
+  ! at level ilevel. Otherwise, it is performed at level ilevel-1.
+  ! This routine is called by move_fine.
+  !------------------------------------------------------------
   logical::error
   integer::i,j,ind,idim,nx_loc,isink
   integer(i8b):: ksink
-  real(dp)::dx,length,scale,r2
+  real(dp)::dx,length,dx_loc,scale,vol_loc,r2
   ! Grid-based arrays
+  integer ,dimension(1:nvector)::father_cell
   real(dp),dimension(1:nvector,1:ndim)::x0
-  integer ,dimension(1:nvector)::ind_cell
   integer ,dimension(1:nvector,1:threetondim)::nbors_father_cells
   integer ,dimension(1:nvector,1:twotondim)::nbors_father_grids
   ! Particle-based arrays
   logical ,dimension(1:nvector)::ok
-  real(dp),dimension(1:nvector)::dteff
-  real(dp),dimension(1:nvector,1:ndim)::x,ff,new_vp,dd,dg
+  real(dp),dimension(1:nvector,1:ndim)::x,ff,new_xp,new_vp,dd,dg
   integer ,dimension(1:nvector,1:ndim)::ig,id,igg,igd,icg,icd
   real(dp),dimension(1:nvector,1:twotondim)::vol
   integer ,dimension(1:nvector,1:twotondim)::igrid,icell,indp,kg
-  real(dp),dimension(1:3)::skip_loc
-  real(dp),dimension(1:ndim)::vrel
+  real(dp),dimension(1:3)::xbound,skip_loc
   integer ::nlevelmax_loc
   real(dp)::dx_min,vol_min,dx_temp,dx_min_loc
   real(dp)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v
   real(dp)::d0,mstar,nISM,nCOM,e,d,u,v,w,ekk
-  integer:: info
+  real(dp)::xx
 
   ! Conversion factor from user units to cgs units
   call units(scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2)
 
   ! Mesh spacing in that level
   dx=0.5D0**ilevel 
+  xbound(1:3)=(/dble(nx),dble(ny),dble(nz)/)
   nx_loc=(icoarse_max-icoarse_min+1)
   skip_loc=(/0.0d0,0.0d0,0.0d0/)
   if(ndim>0)skip_loc(1)=dble(icoarse_min)
   if(ndim>1)skip_loc(2)=dble(jcoarse_min)
   if(ndim>2)skip_loc(3)=dble(kcoarse_min)
   scale=boxlen/dble(nx_loc)
+  dx_loc=dx*scale
+  vol_loc=dx_loc**3
 
   ! Finest cell size
   dx_min=(0.5D0**nlevelmax)*scale
@@ -211,14 +205,15 @@ subroutine sync(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
         x0(i,idim)=xg(ind_grid(i),idim)-3.0D0*dx
      end do
   end do
-
-  ! Gather 27 neighboring father cells (should be present anytime !)
+  
+  ! Gather neighboring father cells (should be present anytime !)
   do i=1,ng
-     ind_cell(i)=father(ind_grid(i))
+     father_cell(i)=father(ind_grid(i))
   end do
-  call get3cubefather(ind_cell,nbors_father_cells,nbors_father_grids,ng,ilevel)
+  call get3cubefather(father_cell,nbors_father_cells,nbors_father_grids,&
+       & ng,ilevel)
 
-  ! Rescale position at level ilevel
+  ! Rescale particle position at level ilevel
   do idim=1,ndim
      do j=1,np
         x(j,idim)=xp(ind_part(j),idim)/scale+skip_loc(idim)
@@ -243,7 +238,7 @@ subroutine sync(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
      end do
   end do
   if(error)then
-     write(*,*)'problem in sync'
+     write(*,*)'problem in move'
      do idim=1,ndim
         do j=1,np
            if(x(j,idim)<0.5D0.or.x(j,idim)>5.5D0)then
@@ -428,43 +423,59 @@ subroutine sync(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
      vol(j,8)=dd(j,1)*dd(j,2)*dd(j,3)
   end do
 #endif
-
+  
   ! Gather 3-force
   ff(1:np,1:ndim)=0.0D0
-  do ind=1,twotondim
-     do idim=1,ndim
-        do j=1,np
-           ff(j,idim)=ff(j,idim)+f(indp(j,ind),idim)*vol(j,ind)
+  if(tracer.and.hydro)then
+     do ind=1,twotondim
+        do idim=1,ndim
+           do j=1,np
+              ff(j,idim)=ff(j,idim)+uold(indp(j,ind),idim+1)/max(uold(indp(j,ind),1),smallr)*vol(j,ind)
+           end do
         end do
      end do
-  end do
+  endif
+  if(poisson)then
+     do ind=1,twotondim
+        do idim=1,ndim
+           do j=1,np
+              ff(j,idim)=ff(j,idim)+f(indp(j,ind),idim)*vol(j,ind)
+           end do
+        end do
+#ifdef OUTPUT_PARTICLE_POTENTIAL
+        do j=1,np
+           ptcl_phi(ind_part(j)) = phi(indp(j,ind))
+        end do
+#endif
+     end do
+  endif
 
-  ! Compute individual time steps
-  do j=1,np
-     if(levelp(ind_part(j))>=ilevel)then
-        dteff(j)=dtnew(levelp(ind_part(j)))
-     else
-        dteff(j)=dtold(levelp(ind_part(j)))
-     endif
-  end do
-
-  ! Update particles level
-  do j=1,np
-     levelp(ind_part(j))=ilevel
-  end do
-
-  ! Update 3-velocity
+  ! Update velocity
   do idim=1,ndim
-     if(static)then
+     if(static.or.tracer)then
         do j=1,np
            new_vp(j,idim)=ff(j,idim)
         end do
      else
         do j=1,np
-           new_vp(j,idim)=vp(ind_part(j),idim)+ff(j,idim)*0.5D0*dteff(j)
+           new_vp(j,idim)=vp(ind_part(j),idim)+ff(j,idim)*0.5D0*dtnew(ilevel)
         end do
      endif
   end do
+
+  ! For sink cloud particle, overwrite velocity with sink velocity 
+  if(sink)then
+     do j=1,np
+        ksink=-idp(ind_part(j))
+        if(ksink.gt. 0 .and. ksink .le.nsinkmax.and.tp(ind_part(j)).eq.0d0)then
+           do idim=1,ndim
+              new_vp(j,idim)=vsink(ksink,idim)+ff(j,idim)*0.5D0*dtnew(ilevel)           
+           enddo
+        endif
+     end do
+  endif
+
+  ! Store velocity
   do idim=1,ndim
      do j=1,np
         vp(ind_part(j),idim)=new_vp(j,idim)
@@ -473,11 +484,9 @@ subroutine sync(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
 
   ! Update sink particle velocity using closest cloud particle
   if(sink)then
-!$omp critical
      do j=1,np
         ksink=-idp(ind_part(j))
-!       if(ksink>0.and.tp(ind_part(j)).eq.0d0)then
-        if(ksink.gt.0.and.ksink.le.nsinkmax.and.ptypep(ind_part(j))==PTYPE_SINK)then
+        if(ksink.gt.0 .and. ksink .le. nsinkmax .and.tp(ind_part(j)).eq.0d0)then
            r2=(xp(ind_part(j),1)-xsink(ksink,1))**2
 #if NDIM>1
            r2=(xp(ind_part(j),2)-xsink(ksink,2))**2+r2
@@ -489,10 +498,42 @@ subroutine sync(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
               vsink_new(ksink,1:ndim)=vp(ind_part(j),1:ndim)
               oksink_new(ksink)=1.0
            end if
-        endif
+           sink_stat(ksink,ilevel,ndim*2+1)=sink_stat(ksink,ilevel,ndim*2+1)+1d0
+           do idim=1,ndim
+              xx=xp(ind_part(j),idim)+vp(ind_part(j),idim)*dtnew(ilevel)-xsink(ksink,idim)              
+              if(xx>scale*xbound(idim)/2.0)then
+                 xx=xx-scale*xbound(idim)
+              endif
+              if(xx<-scale*xbound(idim)/2.0)then
+                 xx=xx+scale*xbound(idim)
+              endif
+              sink_stat(ksink,ilevel,idim     )=sink_stat(ksink,ilevel,idim     )+xsink(ksink,idim)+xx
+              sink_stat(ksink,ilevel,idim+ndim)=sink_stat(ksink,ilevel,idim+ndim)+vp(ind_part(j),idim)
+           enddo
+       endif
      end do
-!$omp end critical
   end if
 
+  ! Update position
+  do idim=1,ndim
+     if(static)then
+        do j=1,np
+           new_xp(j,idim)=xp(ind_part(j),idim)
+        end do
+     else
+        do j=1,np
+           new_xp(j,idim)=xp(ind_part(j),idim)+new_vp(j,idim)*dtnew(ilevel)
+        end do
+     endif
+  end do
+  do idim=1,ndim
+     do j=1,np
+        xp(ind_part(j),idim)=new_xp(j,idim)
+     end do
+  end do
 
-end subroutine sync
+end subroutine move1
+!#########################################################################
+!#########################################################################
+!#########################################################################
+!#########################################################################

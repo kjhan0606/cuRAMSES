@@ -1295,6 +1295,10 @@ subroutine restore_part_hdf5()
   call hdf5_read_dataset_1d_int(grp_id, 'levelp', ibuf, npart_loc, offset_part)
   levelp(1:npart_loc) = ibuf(1:npart_loc)
 
+  ! Read particle type (stored as int4 in HDF5 for convenience, cast to int1)
+  call hdf5_read_dataset_1d_int(grp_id, 'ptypep', ibuf, npart_loc, offset_part)
+  ptypep(1:npart_loc) = int(ibuf(1:npart_loc), kind=1)
+
   ! Read birth epoch and metallicity if star/sink
   if(star .or. sink) then
      call hdf5_read_dataset_1d_dp(grp_id, 'birth_epoch', dbuf, npart_loc, offset_part)

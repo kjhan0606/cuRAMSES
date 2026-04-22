@@ -14,6 +14,7 @@ subroutine backup_part(filename)
   integer,allocatable,dimension(:)::ii
   integer(i8b),allocatable,dimension(:)::ii8
   integer,allocatable,dimension(:)::ll
+  integer(kind=1),allocatable,dimension(:)::l1
   logical,allocatable,dimension(:)::nb
   integer,parameter::tag=1122
   integer::dummy_io,info2
@@ -101,6 +102,18 @@ subroutine backup_part(filename)
   end do
   write(ilun)ll
   deallocate(ll)
+
+  ! Write particle type
+  allocate(l1(1:npart))
+  ipart=0
+  do i=1,npartmax
+     if(levelp(i)>0)then
+        ipart=ipart+1
+        l1(ipart)=ptypep(i)
+     end if
+  end do
+  write(ilun)l1
+  deallocate(l1)
 
 #ifdef OUTPUT_PARTICLE_POTENTIAL
   ! Write potential (added by AP)

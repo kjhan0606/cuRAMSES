@@ -1104,13 +1104,7 @@ subroutine check_load_imbalance(did_remap)
   ! Check weight inhomogeneity and trigger load_balance if
   ! max/avg - 1 > remap_thresh.
   ! Called every coarse step when nremap==0 and remap_thresh>0.
-  !
-  ! Metric matches bisection.f90 cost when memory_balance=.true.:
-  !   mem_weight_grid * n_grids + mem_weight_part * n_particles
-  ! so the trigger fires on the same imbalance that the cut tries to fix.
-  ! When memory_balance=.false., falls back to grid-count × subcycle (compute cost).
   use amr_commons
-  use pm_commons, only: numbp
   implicit none
 #ifndef WITHOUTMPI
   include 'mpif.h'
@@ -1118,37 +1112,20 @@ subroutine check_load_imbalance(did_remap)
   logical,intent(out)::did_remap
 
   real(dp)::my_cost,max_cost,sum_cost,imbalance
-  integer::ilevel,info,nsub,jgrid,igrid
-  integer(i8b)::ngrids_loc,npart_loc
+  integer::ilevel,info,nsub
 #ifndef WITHOUTMPI
   real(dp)::buf(2),gbuf(2)
 #endif
 
   did_remap=.false.
 
-  if(memory_balance .and. pic)then
-     ! Memory-weighted cost (matches bisection cut metric)
-     ngrids_loc=0
-     npart_loc=0
-     do ilevel=levelmin,nlevelmax
-        ngrids_loc=ngrids_loc+numbl(myid,ilevel)
-        igrid=headl(myid,ilevel)
-        do jgrid=1,numbl(myid,ilevel)
-           npart_loc=npart_loc+numbp(igrid)
-           igrid=next(igrid)
-        end do
-     end do
-     my_cost=dble(mem_weight_grid)*dble(ngrids_loc) &
-          +  dble(mem_weight_part)*dble(npart_loc)
-  else
-     ! Compute-cost fallback: grid-count × subcycle weight
-     my_cost=0d0
-     nsub=1
-     do ilevel=levelmin,nlevelmax
-        my_cost=my_cost+dble(numbl(myid,ilevel))*dble(nsub)
-        nsub=nsub*nsubcycle(ilevel)
-     end do
-  end if
+  ! Compute local cost: weighted grid count (subcycle-aware)
+  my_cost=0d0
+  nsub=1
+  do ilevel=levelmin,nlevelmax
+     my_cost=my_cost+dble(numbl(myid,ilevel))*dble(nsub)
+     nsub=nsub*nsubcycle(ilevel)
+  end do
 
 #ifndef WITHOUTMPI
   buf(1)=my_cost

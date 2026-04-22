@@ -33,6 +33,7 @@ subroutine init_part
   integer(i8b),dimension(1:ncpu)::npart_cpu,npart_all
   real(dp),allocatable,dimension(:)::xdp
   integer,allocatable,dimension(:)::isp
+  integer(kind=1),allocatable,dimension(:)::isp1
   integer(i8b),allocatable,dimension(:)::isp8
   logical,allocatable,dimension(:)::nb
   real(kind=4),allocatable,dimension(:,:)::init_plane,init_plane_x
@@ -93,6 +94,8 @@ subroutine init_part
   allocate(prevp (npartmax))
   allocate(levelp(npartmax))
   allocate(idp   (npartmax))
+  allocate(ptypep(npartmax))
+  ! ptypep: mmap zero pages == PTYPE_DM (0). Restart/IC readers overwrite for non-DM.
 #ifdef OUTPUT_PARTICLE_POTENTIAL
   allocate(ptcl_phi(npartmax))
 #endif
@@ -279,6 +282,11 @@ subroutine init_part
      read(ilun)isp
      levelp(1:npart2)=isp
      deallocate(isp)
+     ! Read particle type (mandatory; no backward compat)
+     allocate(isp1(1:npart2))
+     read(ilun)isp1
+     ptypep(1:npart2)=isp1
+     deallocate(isp1)
 #ifdef OUTPUT_PARTICLE_POTENTIAL
       read(ilun)
 #endif
@@ -314,11 +322,11 @@ subroutine init_part
      nDMloc=0
      if(star .or. sink) then
         do i = 1, npart2
-           if(idp(i)>0.and.tp(i)<=0.) then
+           if(idp(i)>0.and.ptypep(i)/=PTYPE_STAR.and.ptypep(i)/=PTYPE_SINK) then
               nDMloc=nDMloc+1
            endif
         enddo
-      else 
+      else
         nDMloc=npart2
       endif
 #ifndef LONGINT
@@ -793,7 +801,7 @@ subroutine init_part
         ! Wait for full completion of sends
         call MPI_WAITALL(countsend,reqsend,statuses,info)
 
-        ! Create new particles
+        ! Create new particles (IC: all DM, so ptypep=PTYPE_DM explicitly)
         do icpu=1,ncpu
            do ibuf=1,recvbuf(icpu)
               jpart=jpart+1
@@ -804,6 +812,7 @@ subroutine init_part
               vp(jpart,2)=reception(icpu,1)%up(ibuf,5)
               vp(jpart,3)=reception(icpu,1)%up(ibuf,6)
               mp(jpart)  =reception(icpu,1)%up(ibuf,7)
+              ptypep(jpart)=PTYPE_DM
            end do
         end do
         
@@ -1010,6 +1019,7 @@ subroutine restore_part_binary_varcpu
   real(dp), allocatable :: xdp(:)
   integer(i8b), allocatable :: isp8(:)
   integer, allocatable :: isp(:)
+  integer(kind=1), allocatable :: isp1(:)
   character(LEN=80) :: fileloc
   character(LEN=5) :: nchar, ncharcpu
 
@@ -1155,6 +1165,12 @@ subroutine restore_part_binary_varcpu
      levelp(ipart+1:ipart+nread) = isp(read_start:read_end)
      deallocate(isp)
 
+     ! Read particle type
+     allocate(isp1(1:npart_this))
+     read(ilun) isp1
+     ptypep(ipart+1:ipart+nread) = isp1(read_start:read_end)
+     deallocate(isp1)
+
 #ifdef OUTPUT_PARTICLE_POTENTIAL
      read(ilun)
 #endif
@@ -1192,7 +1208,7 @@ subroutine restore_part_binary_varcpu
   nDMloc = 0
   if(star .or. sink) then
      do i = 1, npart
-        if(idp(i) > 0 .and. tp(i) <= 0.) nDMloc = nDMloc + 1
+        if(idp(i) > 0 .and. ptypep(i) /= PTYPE_STAR .and. ptypep(i) /= PTYPE_SINK) nDMloc = nDMloc + 1
      end do
   else
      nDMloc = npart
@@ -1233,6 +1249,7 @@ subroutine redistribute_particles_by_position()
   real(dp), allocatable :: sendbuf_dp(:), recvbuf_dp(:)
   integer(i8b), allocatable :: sendbuf_i8(:), recvbuf_i8(:)
   integer, allocatable :: sendbuf_int(:), recvbuf_int(:)
+  integer(kind=1), allocatable :: sendbuf_i1(:), recvbuf_i1(:)
   real(dp), dimension(1:nvector, 1:ndim) :: xtmp
   integer, dimension(1:nvector) :: ctmp
   integer :: nlocal
@@ -1406,6 +1423,34 @@ subroutine redistribute_particles_by_position()
   call MPI_WAITALL(nreq, req, MPI_STATUSES_IGNORE, info)
   levelp(1:npart_new) = recvbuf_int(1:npart_new)
   deallocate(sendbuf_int, recvbuf_int)
+
+  ! --- ptypep (integer(kind=1)) ---
+  itag = 823
+  allocate(sendbuf_i1(1:npart))
+  allocate(recvbuf_i1(1:npart_new))
+  do i = 1, npart
+     sendbuf_i1(i) = ptypep(sort_index(i))
+  end do
+  nreq = 0
+  do i = 1, n_recv_partners
+     icpu = recv_partners(i)
+     nreq = nreq + 1
+     call MPI_IRECV(recvbuf_i1(rdispls(icpu)+1), nrecv(icpu), MPI_INTEGER1, &
+          icpu-1, itag, MPI_COMM_WORLD, req(nreq), info)
+  end do
+  do i = 1, n_send_partners
+     icpu = send_partners(i)
+     nreq = nreq + 1
+     call MPI_ISEND(sendbuf_i1(sdispls(icpu)+1), nsend(icpu), MPI_INTEGER1, &
+          icpu-1, itag, MPI_COMM_WORLD, req(nreq), info)
+  end do
+  if(nsend(myid) > 0) then
+     recvbuf_i1(rdispls(myid)+1:rdispls(myid)+nrecv(myid)) = &
+          sendbuf_i1(sdispls(myid)+1:sdispls(myid)+nsend(myid))
+  end if
+  call MPI_WAITALL(nreq, req, MPI_STATUSES_IGNORE, info)
+  ptypep(1:npart_new) = recvbuf_i1(1:npart_new)
+  deallocate(sendbuf_i1, recvbuf_i1)
 
   ! --- Star/sink properties ---
   if(star .or. sink) then
