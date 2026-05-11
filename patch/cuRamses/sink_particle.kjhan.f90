@@ -1850,6 +1850,7 @@ subroutine kjhan_mk_cloud(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
        ksink=-idp(ind_part(j))
        idp(ind_cloud(j))=-ksink
        tp (ind_cloud(j))=0.0d0
+       ptypep(ind_cloud(j))=PTYPE_SINK
        levelp(ind_cloud(j))=levelmin
        mp(ind_cloud(j))=msink(ksink)/dble(ncloud)
        xp(ind_cloud(j),1)=xp(ind_part(j),1)+xx
