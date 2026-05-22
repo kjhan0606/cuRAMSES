@@ -8,6 +8,11 @@ subroutine adaptive_loop
 #ifdef RT
   use rt_hydro_commons
 #endif
+#ifdef HYDRO_CUDA
+  use poisson_cuda_interface, only: cuda_fft_print_timers_c
+  use cuda_commons, only: cuda_pool_init_f, cuda_available
+  use iso_c_binding, only: c_int
+#endif
   implicit none
 #ifndef WITHOUTMPI
   include 'mpif.h'
@@ -107,6 +112,16 @@ subroutine adaptive_loop
 
   ! Initialize polytropic floor coefficients for eEOS in hydro solver
   call init_eeos_poly_coeff
+
+#ifdef HYDRO_CUDA
+  ! Early CUDA pool init: must happen before first multigrid_fine call so the
+  ! cuFFT direct-solve gate (cuda_pool_is_initialized_c()/=0) passes on every
+  ! rank. Previously init was lazy in godunov_fine, missing the first force solve.
+  if(gpu_hydro .or. gpu_poisson .or. gpu_fft .or. gpu_sink) then
+     call cuda_pool_init_f()
+     if(myid==1) write(*,'(A,L1)') ' Adaptive loop: CUDA pool early-init, available=', cuda_available
+  end if
+#endif
 
   if(myid==1)write(*,*)'Starting time integration'
 
@@ -262,6 +277,9 @@ subroutine adaptive_loop
            call writemem(real_mem_tot)
            call writemem_minmax(real_mem_min,real_mem_max)
            write(*,*)'Total running time:', NINT((tt2-tstart)*100.0)*0.01,'s'
+#ifdef HYDRO_CUDA
+           if(gpu_fft) call cuda_fft_print_timers_c(int(myid, c_int))
+#endif
            ! SFR diagnostic
            if(nstar_tot>0)then
               call units(scale_l_s,scale_t_s,scale_d_s,scale_v_s,scale_nH_s,scale_T2_s)

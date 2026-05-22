@@ -114,6 +114,20 @@ static int*                d_fft_map     = nullptr;
 static int g_fft_Nx = 0, g_fft_Ny = 0, g_fft_Nz = 0;
 static bool g_fft_has_correction = false;
 
+// cuFFT per-phase timers (reviewer comment C11): H2D / forward / Green / inverse / D2H
+static cudaEvent_t ev_fft_t0 = nullptr;
+static cudaEvent_t ev_fft_t1 = nullptr;  // after H2D
+static cudaEvent_t ev_fft_t2 = nullptr;  // after fwd FFT
+static cudaEvent_t ev_fft_t3 = nullptr;  // after Green mul
+static cudaEvent_t ev_fft_t4 = nullptr;  // after inv FFT
+static cudaEvent_t ev_fft_t5 = nullptr;  // after D2H
+static double t_fft_h2d_ms = 0.0;
+static double t_fft_fwd_ms = 0.0;
+static double t_fft_mul_ms = 0.0;
+static double t_fft_inv_ms = 0.0;
+static double t_fft_d2h_ms = 0.0;
+static int    n_fft_calls  = 0;
+
 // ==========================================================================
 // cuFFTMp distributed Poisson solver state
 // ==========================================================================
@@ -1290,9 +1304,21 @@ void cuda_fft_poisson_solve_host(const double* h_rhs_3d, double* h_phi_3d, int N
     int Nz_complex = g_fft_Nz / 2 + 1;
     long long N_complex = (long long)g_fft_Nx * g_fft_Ny * Nz_complex;
 
+    if (!ev_fft_t0) {
+        cudaEventCreate(&ev_fft_t0);
+        cudaEventCreate(&ev_fft_t1);
+        cudaEventCreate(&ev_fft_t2);
+        cudaEventCreate(&ev_fft_t3);
+        cudaEventCreate(&ev_fft_t4);
+        cudaEventCreate(&ev_fft_t5);
+    }
+
+    cudaEventRecord(ev_fft_t0, g_mg_stream);
+
     // Upload global RHS 3D array to d_fft_real
     cudaMemcpyAsync(d_fft_real, h_rhs_3d, (size_t)N_real * sizeof(double),
                     cudaMemcpyHostToDevice, g_mg_stream);
+    cudaEventRecord(ev_fft_t1, g_mg_stream);
 
     // Forward FFT: R2C
     cufftResult r = cufftExecD2Z(g_fft_plan_d2z, d_fft_real, d_fft_complex);
@@ -1300,6 +1326,7 @@ void cuda_fft_poisson_solve_host(const double* h_rhs_3d, double* h_phi_3d, int N
         fprintf(stderr, "cuFFT forward FAILED: %d\n", r);
         return;
     }
+    cudaEventRecord(ev_fft_t2, g_mg_stream);
 
     // Apply Green's function (with optional neutrino/DE correction)
     int block = 256;
@@ -1311,6 +1338,7 @@ void cuda_fft_poisson_solve_host(const double* h_rhs_3d, double* h_phi_3d, int N
         fft_green_kernel<<<grid, block, 0, g_mg_stream>>>(
             d_fft_complex, d_fft_green, (int)N_complex);
     }
+    cudaEventRecord(ev_fft_t3, g_mg_stream);
 
     // Inverse FFT: C2R
     r = cufftExecZ2D(g_fft_plan_z2d, d_fft_complex, d_fft_real);
@@ -1318,11 +1346,51 @@ void cuda_fft_poisson_solve_host(const double* h_rhs_3d, double* h_phi_3d, int N
         fprintf(stderr, "cuFFT inverse FAILED: %d\n", r);
         return;
     }
+    cudaEventRecord(ev_fft_t4, g_mg_stream);
 
     // Download result to host (no scatter to d_mg_phi)
     cudaMemcpyAsync(h_phi_3d, d_fft_real, (size_t)N_real * sizeof(double),
                     cudaMemcpyDeviceToHost, g_mg_stream);
+    cudaEventRecord(ev_fft_t5, g_mg_stream);
     cudaStreamSynchronize(g_mg_stream);
+
+    float ms;
+    cudaEventElapsedTime(&ms, ev_fft_t0, ev_fft_t1); t_fft_h2d_ms += ms;
+    cudaEventElapsedTime(&ms, ev_fft_t1, ev_fft_t2); t_fft_fwd_ms += ms;
+    cudaEventElapsedTime(&ms, ev_fft_t2, ev_fft_t3); t_fft_mul_ms += ms;
+    cudaEventElapsedTime(&ms, ev_fft_t3, ev_fft_t4); t_fft_inv_ms += ms;
+    cudaEventElapsedTime(&ms, ev_fft_t4, ev_fft_t5); t_fft_d2h_ms += ms;
+    n_fft_calls++;
+}
+
+// ==========================================================================
+// C API: cuda_fft_print_timers
+// Print accumulated H2D / fwd / Green / inv / D2H timings (reviewer C11).
+// Times are in seconds, summed across all calls since program start.
+// ==========================================================================
+void cuda_fft_print_timers(int rank)
+{
+    if (n_fft_calls <= 0) return;
+    double tot = (t_fft_h2d_ms + t_fft_fwd_ms + t_fft_mul_ms
+                  + t_fft_inv_ms + t_fft_d2h_ms) * 1e-3;
+    double th2d = t_fft_h2d_ms * 1e-3;
+    double tfwd = t_fft_fwd_ms * 1e-3;
+    double tmul = t_fft_mul_ms * 1e-3;
+    double tinv = t_fft_inv_ms * 1e-3;
+    double td2h = t_fft_d2h_ms * 1e-3;
+    double frac = (tot > 0.0) ? 100.0 : 0.0;
+    printf("[cuFFT timers rank=%d N=%dx%dx%d ncalls=%d] "
+           "total=%.3fs  H2D=%.3fs(%.1f%%)  fwd=%.3fs(%.1f%%)  "
+           "green=%.3fs(%.1f%%)  inv=%.3fs(%.1f%%)  D2H=%.3fs(%.1f%%)\n",
+           rank, g_fft_Nx, g_fft_Ny, g_fft_Nz, n_fft_calls,
+           tot,
+           th2d, tot>0?100*th2d/tot:0.0,
+           tfwd, tot>0?100*tfwd/tot:0.0,
+           tmul, tot>0?100*tmul/tot:0.0,
+           tinv, tot>0?100*tinv/tot:0.0,
+           td2h, tot>0?100*td2h/tot:0.0);
+    fflush(stdout);
+    (void)frac;
 }
 
 // ==========================================================================
@@ -1337,6 +1405,12 @@ void cuda_fft_poisson_free(void)
     if (d_fft_complex) { cudaFree(d_fft_complex); d_fft_complex = nullptr; }
     if (d_fft_green)   { cudaFree(d_fft_green);   d_fft_green   = nullptr; }
     if (d_fft_map)     { cudaFree(d_fft_map);     d_fft_map     = nullptr; }
+    if (ev_fft_t0) { cudaEventDestroy(ev_fft_t0); ev_fft_t0 = nullptr; }
+    if (ev_fft_t1) { cudaEventDestroy(ev_fft_t1); ev_fft_t1 = nullptr; }
+    if (ev_fft_t2) { cudaEventDestroy(ev_fft_t2); ev_fft_t2 = nullptr; }
+    if (ev_fft_t3) { cudaEventDestroy(ev_fft_t3); ev_fft_t3 = nullptr; }
+    if (ev_fft_t4) { cudaEventDestroy(ev_fft_t4); ev_fft_t4 = nullptr; }
+    if (ev_fft_t5) { cudaEventDestroy(ev_fft_t5); ev_fft_t5 = nullptr; }
     g_fft_Nx = 0; g_fft_Ny = 0; g_fft_Nz = 0;
 }
 

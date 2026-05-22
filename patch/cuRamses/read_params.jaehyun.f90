@@ -32,6 +32,7 @@ subroutine read_params
        & ,jobcontrolfile &
        & ,gpu_hydro,gpu_poisson,gpu_fft,gpu_sink,gpu_auto_tune,n_cuda_streams &
        & ,use_fftw &
+       & ,mg_merged_rb &
        & ,dump_pk &
        & ,exchange_method &
        & ,use_neutrino &
@@ -69,7 +70,8 @@ subroutine read_params
        & sidm_nstates,sidm_energy,sidm_frac_init, &
        & sidm_a_type,sidm_a_transition,sidm_sigma_ratio,sidm_a_width, &
        & sidm_fdiss, &
-       & sidm_baryon,sidm_baryon_sigma,sidm_baryon_power
+       & sidm_baryon,sidm_baryon_sigma,sidm_baryon_power, &
+       & sidm_vrel_max
 namelist/adm_params/adm_alpha,adm_mp,adm_me_ratio,adm_xi, &
        & adm_cross_section
   namelist/fdm_params/m_axion,fdm_courant,fdm_nrefine_dB,fdm_hybrid
@@ -339,6 +341,17 @@ namelist/adm_params/adm_alpha,adm_mp,adm_me_ratio,adm_xi, &
 #endif
 
   !-------------------------------------------------
+  ! Multigrid merged red/black smoother diagnostic
+  !-------------------------------------------------
+  if(myid==1) then
+     if(mg_merged_rb) then
+        write(*,'(A)') ' Multigrid GPU smoother in merged red/black mode (mg_merged_rb=T)'
+     else
+        write(*,'(A)') ' Multigrid GPU smoother in strict red/black mode (mg_merged_rb=F, bitwise NCPU independent)'
+     end if
+  end if
+
+  !-------------------------------------------------
   ! Auto-compute mem_weight_grid from nvar if sentinel (0)
   ! Per cell (×twotondim per grid):
   !   Hydro:   2*nvar*8 (uold+unew)
@@ -452,6 +465,7 @@ namelist/adm_params/adm_alpha,adm_mp,adm_me_ratio,adm_xi, &
         end if
         write(*,'(A,I4)')        '   npart_min=', sidm_npart_min
         write(*,'(A,F5.2)')      '   courant=', sidm_courant
+        write(*,'(A,ES10.3,A)')  '   vrel_max=', sidm_vrel_max, ' cm/s'
         write(*,'(A,A)')         '   angular: ', trim(sidm_angular)
         if(trim(sidm_angular) == 'rutherford') &
              write(*,'(A,ES10.3)') '   epsilon=', sidm_epsilon

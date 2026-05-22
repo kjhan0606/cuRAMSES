@@ -74,6 +74,13 @@ module amr_parameters
   ! FFTW3 CPU direct Poisson solver (requires USE_FFTW compilation)
   logical::use_fftw=.false.    ! FFTW3 CPU direct solve for uniform base level
 
+  ! Multigrid merged red/black smoother
+  ! .true.  -> GPU MG performs red then black with a single phi communication
+  !            after both colours (faster, residual depends on rank decomposition)
+  ! .false. -> GPU MG communicates phi between red and black, restoring bitwise
+  !            independence of the residual from the rank count (slightly slower)
+  logical::mg_merged_rb=.true.
+
   ! Power spectrum measurement at output time (requires USE_FFTW)
   logical::dump_pk=.false.     ! Dump P(k) at each output snapshot
 
@@ -330,6 +337,8 @@ module amr_parameters
   real(dp)::sidm_a_width=0.05d0           ! Sigmoid transition width
   ! Dissipative SIDM (dSIDM)
   real(dp)::sidm_fdiss=0.0d0          ! Dissipation fraction per scatter [0,1)
+  ! Pathological-pair rejection: reject scatter if pair v_rel exceeds this cap
+  real(dp)::sidm_vrel_max=3.0d9       ! Max physical |v_rel| [cm/s] (~30000 km/s; 0 disables)
   ! DM-baryon drag (IDM)
   logical ::sidm_baryon=.false.        ! Enable DM-baryon drag force
   real(dp)::sidm_baryon_sigma=1.0d0    ! sigma_DM-b / m_DM [cm^2/g]

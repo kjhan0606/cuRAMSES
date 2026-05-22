@@ -26,6 +26,11 @@ subroutine diag_check_eint(label, ilev_check)
   real(dp) :: d_worst, u_worst, v_worst, w_worst, etot_worst
   integer :: neg_count_loc, neg_count_glob
 
+  ! Diagnostic reads uold; only allocated when hydro=.true.
+  ! Several callers in amr_step.jaehyun.f90 (e.g. the unconditional
+  ! 'cooling' call at line 833) fire even on poisson-only / DM-only runs.
+  if(.not. hydro) return
+
   if(ilev_check == 0) then
      lmin = levelmin
      lmax = nlevelmax

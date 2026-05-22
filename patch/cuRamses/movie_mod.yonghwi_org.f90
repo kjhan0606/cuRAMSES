@@ -649,7 +649,7 @@ subroutine output_frame()
      ! Fill up map with projected mass
 #ifdef SOLVERmhd
      if(star) then
-        if(tp(j).eq.0.) then
+        if(ptypep(j)==PTYPE_DM) then
            if(mass_cut_refine>0.0.and.zoom_only) then
               if(mp(j)<mass_cut_refine) data_frame(ii,jj,NVAR+5)=data_frame(ii,jj,NVAR+5)+mp(j)
            else
@@ -667,7 +667,7 @@ subroutine output_frame()
      endif
 #else
      if(star) then
-        if(tp(j).eq.0.) then
+        if(ptypep(j)==PTYPE_DM) then
            if(mass_cut_refine>0.0.and.zoom_only) then
               if(mp(j)<mass_cut_refine) data_frame(ii,jj,NVAR+1)=data_frame(ii,jj,NVAR+1)+mp(j)
            else

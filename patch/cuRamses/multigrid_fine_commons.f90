@@ -230,6 +230,14 @@ subroutine multigrid_fine(ilevel,icount)
                      * 8_i8b**(ilevel-1)
       if(numbtot(1,ilevel) == expected_grids) is_uniform_fft = .true.
    end if
+   ! Force consensus across MPI ranks (MIN: if any rank can't use FFT direct,
+   ! all fall back to MG — otherwise ranks diverge into incompatible collectives).
+#ifndef WITHOUTMPI
+   ri_flag = 0; if(is_uniform_fft) ri_flag = 1
+   call MPI_ALLREDUCE(MPI_IN_PLACE, ri_flag, 1, &
+        MPI_INTEGER, MPI_MIN, MPI_COMM_WORLD, info)
+   is_uniform_fft = (ri_flag == 1)
+#endif
 
    ! GPU MG setup: controlled by gpu_poisson namelist parameter
    ! All ranks must enter this block together (contains MPI collectives)
@@ -321,6 +329,12 @@ subroutine multigrid_fine(ilevel,icount)
       end do
       if(myid==1) write(*,'(A,I5,A)') &
            '   ==> Level=',ilevel,' FFT direct solve DONE'
+#ifdef HYDRO_CUDA
+      ! Print cuFFT phase timers immediately after first solve (reviewer C11).
+      ! Doing it here (not at coarse-step end) ensures we capture data even if
+      ! a later phase of the step crashes before adaptive_loop's print.
+      if(myid==1 .and. .not. use_fftw) call cuda_fft_print_timers_c(int(myid, c_int))
+#endif
       return
    end if
 
@@ -337,13 +351,14 @@ subroutine multigrid_fine(ilevel,icount)
             if(safe_mode(ilevel)) safe_int = 1
             call cuda_mg_gauss_seidel_c(int(active(ilevel)%ngrid,c_int), &
                  int(ngridmax,c_int), int(ncoarse,c_int), dx2_mg, 0, safe_int)
+            if(.not.mg_merged_rb) call make_virtual_fine_dp_gpu(ilevel)
             call cuda_mg_gauss_seidel_c(int(active(ilevel)%ngrid,c_int), &
                  int(ngridmax,c_int), int(ncoarse,c_int), dx2_mg, 1, safe_int)
             call make_virtual_fine_dp_gpu(ilevel)
          else
 #endif
             call gauss_seidel_mg_fine(ilevel,.true. )  ! Red step
-            call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi (Red)
+            if(.not.mg_merged_rb) call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi (Red)
             call gauss_seidel_mg_fine(ilevel,.false.)  ! Black step
             call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi (Black)
 #ifdef HYDRO_CUDA
@@ -458,13 +473,14 @@ subroutine multigrid_fine(ilevel,icount)
             if(safe_mode(ilevel)) safe_int = 1
             call cuda_mg_gauss_seidel_c(int(active(ilevel)%ngrid,c_int), &
                  int(ngridmax,c_int), int(ncoarse,c_int), dx2_mg, 0, safe_int)
+            if(.not.mg_merged_rb) call make_virtual_fine_dp_gpu(ilevel)
             call cuda_mg_gauss_seidel_c(int(active(ilevel)%ngrid,c_int), &
                  int(ngridmax,c_int), int(ncoarse,c_int), dx2_mg, 1, safe_int)
             call make_virtual_fine_dp_gpu(ilevel)
          else
 #endif
             call gauss_seidel_mg_fine(ilevel,.true. )  ! Red step
-            call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi (Red)
+            if(.not.mg_merged_rb) call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi (Red)
             call gauss_seidel_mg_fine(ilevel,.false.)  ! Black step
             call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi (Black)
 #ifdef HYDRO_CUDA

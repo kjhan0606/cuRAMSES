@@ -24,6 +24,7 @@ subroutine sidm_scatter(ilevel)
   integer::mythread,nthreads
   integer,dimension(:),allocatable::nparticles,ptrhead
   integer::sidm_n_scatter,sidm_n_pairs,sidm_n_up,sidm_n_down
+  integer::sidm_n_vrel_reject
   real(dp)::sidm_dp(3),sidm_dEk,sidm_dp_max,sidm_dEk_max
   real(dp)::sidm_Pmax_level
   real(dp)::sidm_dEdiss  ! Cumulative dissipated energy (dSIDM)
@@ -33,7 +34,7 @@ subroutine sidm_scatter(ilevel)
   integer,dimension(:,:),allocatable::sidm_seeds
   logical,save::sidm_excited_init = .false.
   common /sidm_omp/ mythread
-  common /sidm_diag/ sidm_n_scatter,sidm_n_pairs,sidm_n_up,sidm_n_down
+  common /sidm_diag/ sidm_n_scatter,sidm_n_pairs,sidm_n_up,sidm_n_down,sidm_n_vrel_reject
   common /sidm_cons/ sidm_dp,sidm_dEk,sidm_dp_max,sidm_dEk_max
   common /sidm_pmax_c/ sidm_Pmax_level
   common /sidm_diss/ sidm_dEdiss
@@ -77,6 +78,7 @@ subroutine sidm_scatter(ilevel)
   sidm_n_pairs    = 0
   sidm_n_up       = 0
   sidm_n_down     = 0
+  sidm_n_vrel_reject = 0
   sidm_dp(:)      = 0.0d0
   sidm_dEk        = 0.0d0
   sidm_dp_max     = 0.0d0
@@ -110,6 +112,7 @@ subroutine sidm_scatter(ilevel)
   call MPI_ALLREDUCE(MPI_IN_PLACE,sidm_n_pairs,  1,MPI_INTEGER,MPI_SUM,MPI_COMM_WORLD,info)
   call MPI_ALLREDUCE(MPI_IN_PLACE,sidm_n_up,     1,MPI_INTEGER,MPI_SUM,MPI_COMM_WORLD,info)
   call MPI_ALLREDUCE(MPI_IN_PLACE,sidm_n_down,   1,MPI_INTEGER,MPI_SUM,MPI_COMM_WORLD,info)
+  call MPI_ALLREDUCE(MPI_IN_PLACE,sidm_n_vrel_reject,1,MPI_INTEGER,MPI_SUM,MPI_COMM_WORLD,info)
   call MPI_ALLREDUCE(MPI_IN_PLACE,sidm_dp,   3,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
   call MPI_ALLREDUCE(MPI_IN_PLACE,sidm_dEk,  1,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
   call MPI_ALLREDUCE(MPI_IN_PLACE,sidm_dp_max, 1,MPI_DOUBLE_PRECISION,MPI_MAX,MPI_COMM_WORLD,info)
@@ -139,6 +142,11 @@ subroutine sidm_scatter(ilevel)
      if(sidm_fdiss > 0.0d0 .and. sidm_dEdiss /= 0.0d0) then
         write(*,'(A,ES12.4)') '   dEdiss_total=', sidm_dEdiss
      end if
+     if(sidm_n_vrel_reject > 0) then
+        write(*,'(A,I10,A,ES10.3,A)') &
+             '   vrel_rejected=', sidm_n_vrel_reject, &
+             ' (cap=', sidm_vrel_max, ' cm/s)'
+     end if
   end if
 
 111 format('   Entering sidm_scatter for level ',I2)
@@ -158,10 +166,11 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
 
   ! Shared counters (common with sidm_scatter)
   integer::sidm_n_scatter,sidm_n_pairs,sidm_n_up,sidm_n_down
+  integer::sidm_n_vrel_reject
   real(dp)::sidm_dp(3),sidm_dEk,sidm_dp_max,sidm_dEk_max
   real(dp)::sidm_Pmax_level
   real(dp)::sidm_dEdiss
-  common /sidm_diag/ sidm_n_scatter,sidm_n_pairs,sidm_n_up,sidm_n_down
+  common /sidm_diag/ sidm_n_scatter,sidm_n_pairs,sidm_n_up,sidm_n_down,sidm_n_vrel_reject
   common /sidm_cons/ sidm_dp,sidm_dEk,sidm_dp_max,sidm_dEk_max
   common /sidm_pmax_c/ sidm_Pmax_level
   common /sidm_diss/ sidm_dEdiss
@@ -188,6 +197,7 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
 
   ! Scattering counters (thread-local)
   integer::n_scatter_loc,n_pairs_loc,n_up_loc,n_down_loc
+  integer::n_vrel_reject_loc
   ! Conservation diagnostics (thread-local)
   real(dp)::dp_loc(3),dEk_loc,dp_max_loc,dEk_max_loc
   real(dp)::P_max_loc
@@ -246,6 +256,7 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
   n_pairs_loc   = 0
   n_up_loc      = 0
   n_down_loc    = 0
+  n_vrel_reject_loc = 0
   dp_loc(:)     = 0.0d0
   dEk_loc       = 0.0d0
   dp_max_loc    = 0.0d0
@@ -320,12 +331,32 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
            v1(1:3) = vp(ind_dm(ipair),   1:3) * scale_v / aexp
            v2(1:3) = vp(ind_dm(ipair+1), 1:3) * scale_v / aexp
 
+           ! [DEBUG] PRE-scatter NaN trap
+           if(v1(1)/=v1(1).or.v1(2)/=v1(2).or.v1(3)/=v1(3).or. &
+              v2(1)/=v2(1).or.v2(2)/=v2(2).or.v2(3)/=v2(3)) then
+              write(*,'(A,I6,A,I3,A,I8,A,2I12)') &
+                   ' SIDM PRE-SCATTER NaN: rank=',myid,' ilevel=',ilevel, &
+                   ' icell=',icell,' part=',ind_dm(ipair),ind_dm(ipair+1)
+              write(*,'(A,3ES14.6)') '   vp1 (code units)=',vp(ind_dm(ipair),  1:3)
+              write(*,'(A,3ES14.6)') '   vp2 (code units)=',vp(ind_dm(ipair+1),1:3)
+              write(*,'(A,2ES14.6)') '   mp1, mp2=',mp(ind_dm(ipair)),mp(ind_dm(ipair+1))
+              write(*,'(A,2I4)')     '   ptypep=',ptypep(ind_dm(ipair)),ptypep(ind_dm(ipair+1))
+              write(*,'(A,3ES14.6)') '   aexp,scale_v,scale_d=',aexp,scale_v,scale_d
+              stop 'SIDM_PRE_NAN'
+           end if
+
            ! Relative velocity
            v_rel_vec(1:3) = v1(1:3) - v2(1:3)
            v_rel_mag = sqrt(v_rel_vec(1)**2 + v_rel_vec(2)**2 &
                           + v_rel_vec(3)**2)
 
            if(v_rel_mag==0.0d0) cycle
+
+           ! Pathological-pair rejection: skip if relative velocity exceeds cap
+           if(sidm_vrel_max > 0.0d0 .and. v_rel_mag > sidm_vrel_max) then
+              n_vrel_reject_loc = n_vrel_reject_loc + 1
+              cycle
+           end if
 
            ! --- Velocity-dependent cross-section ---
            v_rel_kms = v_rel_mag * 1.0d-5  ! cm/s -> km/s
@@ -525,6 +556,27 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
            v1_new(1:3) = v_cm(1:3) + (m2/mtot)*v_rel_new(1:3)
            v2_new(1:3) = v_cm(1:3) - (m1/mtot)*v_rel_new(1:3)
 
+           ! [DEBUG] POST-scatter NaN trap
+           if(v1_new(1)/=v1_new(1).or.v1_new(2)/=v1_new(2).or.v1_new(3)/=v1_new(3).or. &
+              v2_new(1)/=v2_new(1).or.v2_new(2)/=v2_new(2).or.v2_new(3)/=v2_new(3)) then
+              write(*,'(A,I6,A,I3,A,I8)') &
+                   ' SIDM POST-SCATTER NaN: rank=',myid,' ilevel=',ilevel,' icell=',icell
+              write(*,'(A,2I12)')    '   ind_dm pair=', ind_dm(ipair), ind_dm(ipair+1)
+              write(*,'(A,2ES14.6)') '   m1, m2 [g]=', m1, m2
+              write(*,'(A,3ES14.6)') '   v1=', v1(1:3)
+              write(*,'(A,3ES14.6)') '   v2=', v2(1:3)
+              write(*,'(A,3ES14.6)') '   v_cm=', v_cm(1:3)
+              write(*,'(A,3ES14.6)') '   v_rel_vec=', v_rel_vec(1:3)
+              write(*,'(A,2ES14.6)') '   v_rel_mag, v_rel_kms=', v_rel_mag, v_rel_kms
+              write(*,'(A,3ES14.6)') '   cos_theta,sin_theta,phi_rand=', cos_theta,sin_theta,phi_rand
+              write(*,'(A,3ES14.6)') '   nhat=', nhat(1:3)
+              write(*,'(A,4ES14.6)') '   v_rel_new=', v_rel_new(1:3), v_rel_new_mag
+              write(*,'(A,3ES14.6)') '   v1_new=', v1_new(1:3)
+              write(*,'(A,3ES14.6)') '   v2_new=', v2_new(1:3)
+              write(*,'(A,3ES14.6)') '   aexp,scale_v,sigma_over_m=', aexp,scale_v,sigma_over_m
+              stop 'SIDM_POST_NAN'
+           end if
+
            ! Apply state transitions (multi-state iSIDM)
            if(do_transition) then
               ptypep(ind_dm(ipair))   = isidm_state_to_ptype(new_state_1)
@@ -566,6 +618,7 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
   sidm_n_pairs   = sidm_n_pairs + n_pairs_loc
   sidm_n_up      = sidm_n_up + n_up_loc
   sidm_n_down    = sidm_n_down + n_down_loc
+  sidm_n_vrel_reject = sidm_n_vrel_reject + n_vrel_reject_loc
   sidm_dp(1:3)   = sidm_dp(1:3) + dp_loc(1:3)
   sidm_dEk       = sidm_dEk + dEk_loc
   if(dp_max_loc > sidm_dp_max) sidm_dp_max = dp_max_loc

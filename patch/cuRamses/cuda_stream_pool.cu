@@ -215,6 +215,7 @@ static void ensure_pinned_buffers(int slot, int ngrid) {
 extern "C" {
 
 void cuda_pool_init(int local_rank, int n_streams) {
+    if (pool_initialized) return;
     int device_count = 0;
     cudaGetDeviceCount(&device_count);
     if (device_count <= 0) {

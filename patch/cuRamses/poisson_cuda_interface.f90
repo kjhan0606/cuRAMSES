@@ -195,6 +195,13 @@ module poisson_cuda_interface
           bind(C, name='cuda_fft_poisson_free')
      end subroutine
 
+     ! cuFFT Poisson: print accumulated H2D/fwd/Green/inv/D2H timings (C11)
+     subroutine cuda_fft_print_timers_c(rank) &
+          bind(C, name='cuda_fft_print_timers')
+       import :: c_int
+       integer(c_int), value :: rank
+     end subroutine
+
 #ifdef USE_CUFFTMP
      ! cuFFTMp: setup distributed FFT plan with MPI communicator
      subroutine cuda_fftmp_poisson_setup_c(f_comm, Nx, Ny, Nz, dx2) &

@@ -466,6 +466,8 @@ subroutine cmp_new_cpu_map
 
   real(dp),dimension(1:1,1:ndim) :: xx_tmp
   integer,dimension(1:1) :: c_tmp
+  ! Vector scratch for ksection cpu-map (Pass 2)
+  integer,dimension(1:nvector) :: c_tmp_v
 
   ! OMP variables for parallelized remap
   integer::batch_size, my_base, my_idx
@@ -474,7 +476,9 @@ subroutine cmp_new_cpu_map
 
   ! Time-based load balancing blend factor
   real(kind=8),dimension(1:MAXLEVEL) :: blend_factor
-  real(kind=8) :: my_cpc, sum_cpc, avg_cpc, tf
+  real(kind=8),dimension(1:MAXLEVEL) :: my_cpc_arr, sum_cpc_arr
+  real(kind=8) :: avg_cpc, tf
+  logical :: do_time_blend
 
   ! Local constants
   nxny=nx*ny
@@ -492,23 +496,29 @@ subroutine cmp_new_cpu_map
      niter_cost(levelmin:nlevelmax)=1
   endif
 
-  ! Time-based load balancing: compute per-level blend factor
+  ! Time-based load balancing: compute per-level blend factor.
+  ! Only meaningful for hilbert ordering — ksection/bisection rebuild cost
+  ! histograms in build_ksection/build_bisection where blend_factor is not
+  ! applied. Skip the (cross-rank synchronizing) compute when use_cpubox_decomp
+  ! is true to avoid N tiny allreduces with no effect.
   blend_factor = 1d0
+  do_time_blend = (time_balance_alpha > 0d0) .and. (nstep_coarse > 0) &
+       .and. (.not. use_cpubox_decomp)
 #ifndef WITHOUTMPI
-  if(time_balance_alpha > 0d0 .and. nstep_coarse > 0) then
+  if(do_time_blend) then
+     ! Pack per-level cost-per-cell into one array; single batched allreduce.
+     my_cpc_arr = 0d0
      do ilevel = levelmin, nlevelmax
-        ! Cost-per-cell on this rank
         if(level_ncells_loc(ilevel) > 0) then
-           my_cpc = level_time_loc(ilevel) / dble(level_ncells_loc(ilevel))
-        else
-           my_cpc = 0d0
+           my_cpc_arr(ilevel) = level_time_loc(ilevel) / dble(level_ncells_loc(ilevel))
         end if
-        ! Global average cost-per-cell
-        call MPI_ALLREDUCE(my_cpc, sum_cpc, 1, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, info)
-        avg_cpc = sum_cpc / dble(ncpu)
-        ! Time correction factor
+     end do
+     call MPI_ALLREDUCE(my_cpc_arr, sum_cpc_arr, MAXLEVEL, &
+          & MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, info)
+     do ilevel = levelmin, nlevelmax
+        avg_cpc = sum_cpc_arr(ilevel) / dble(ncpu)
         if(avg_cpc > 0d0) then
-           tf = my_cpc / avg_cpc   ! >1 means this rank is slower
+           tf = my_cpc_arr(ilevel) / avg_cpc   ! >1 means this rank is slower
         else
            tf = 1d0
         end if
@@ -611,93 +621,82 @@ subroutine cmp_new_cpu_map
 #endif
      end do
      !$OMP END SINGLE
-     ! Loop over cpus
-     do icpu=1,ncpu
-        if(icpu==myid)then
-           ncache=active(ilevel)%ngrid
-        else
-           ncache=reception(icpu,ilevel)%ngrid
-        end if
-        ! Loop over grids by vector sweeps (OMP workshared)
-        !$OMP DO SCHEDULE(DYNAMIC,4)
-        do igrid=1,ncache,nvector
-           ! Gather nvector grids
-           ngrid=MIN(nvector,ncache-igrid+1)
-           if(icpu==myid)then
-              do i=1,ngrid
-                 ind_grid(i)=active(ilevel)%igrid(igrid+i-1)
-              end do
-           else
-              do i=1,ngrid
-                 ind_grid(i)=reception(icpu,ilevel)%igrid(igrid+i-1)
-              end do
+     ! Only active(myid) grids contribute leaf cells with cpu_map==myid.
+     ! Reception(icpu,ilevel)%igrid level-ilevel cells have cpu_map=icpu
+     ! by build_comm invariant, so the filter never matches for icpu/=myid.
+     ncache=active(ilevel)%ngrid
+     ! Loop over grids by vector sweeps (OMP workshared)
+     !$OMP DO SCHEDULE(DYNAMIC,4)
+     do igrid=1,ncache,nvector
+        ! Gather nvector grids
+        ngrid=MIN(nvector,ncache-igrid+1)
+        do i=1,ngrid
+           ind_grid(i)=active(ilevel)%igrid(igrid+i-1)
+        end do
+        ! Loop over cells
+        do ind=1,twotondim
+           iskip=ncoarse+(ind-1)*ngridmax
+           do i=1,ngrid
+              ind_cell(i)=ind_grid(i)+iskip
+           end do
+           do idim=1,ndim
+           ncell_loc=0
+           do i=1,ngrid
+           if(cpu_map(ind_cell(i))==myid.and.son(ind_cell(i))==0)then
+              ncell_loc=ncell_loc+1
+              xx(ncell_loc,idim)=(xg(ind_grid(i),idim)+xc(ind,idim))*scale
            end if
-           ! Loop over cells
-           do ind=1,twotondim
-              iskip=ncoarse+(ind-1)*ngridmax
-              do i=1,ngrid
-                 ind_cell(i)=ind_grid(i)+iskip
-              end do
-              do idim=1,ndim
-              ncell_loc=0
-              do i=1,ngrid
+           end do
+           end do
+           if(ncell_loc>0)then
+              call cmp_minmaxorder(xx,order_min,order_max,dx*scale,ncell_loc)
+              call cmp_dommap(xx,dom,ncell_loc)
+           end if
+           ! Reserve batch of indices atomically
+           batch_size=ncell_loc
+           if(batch_size>0)then
+              !$OMP ATOMIC CAPTURE
+              my_base=ncell
+              ncell=ncell+batch_size
+              !$OMP END ATOMIC
+           end if
+           ncell_loc=0
+           do i=1,ngrid
               if(cpu_map(ind_cell(i))==myid.and.son(ind_cell(i))==0)then
                  ncell_loc=ncell_loc+1
-                 xx(ncell_loc,idim)=(xg(ind_grid(i),idim)+xc(ind,idim))*scale
-              end if
-              end do
-              end do
-              if(ncell_loc>0)then
-                 call cmp_minmaxorder(xx,order_min,order_max,dx*scale,ncell_loc)
-                 call cmp_dommap(xx,dom,ncell_loc)
-              end if
-              ! Reserve batch of indices atomically
-              batch_size=ncell_loc
-              if(batch_size>0)then
-                 !$OMP ATOMIC CAPTURE
-                 my_base=ncell
-                 ncell=ncell+batch_size
-                 !$OMP END ATOMIC
-              end if
-              ncell_loc=0
-              do i=1,ngrid
-                 if(cpu_map(ind_cell(i))==myid.and.son(ind_cell(i))==0)then
-                    ncell_loc=ncell_loc+1
-                    my_idx=my_base+ncell_loc
-                    isub=(dom(ncell_loc)-1)/ncpu+1
-                    ncell_sub_t(isub)=ncell_sub_t(isub)+1
-                    if(memory_balance) then
-                       flag1(my_idx)=mem_weight_grid
-                    else
-                       flag1(my_idx)=8*10 ! Original magic number
-                    endif
-                    if(pic)then
-                       flag1(my_idx)=flag1(my_idx)+numbp(ind_grid(i))
-                    endif
-                    if(allocated(sink_per_grid))then
-                       flag1(my_idx)=flag1(my_idx)+sink_per_grid(ind_grid(i))*mem_weight_sink
-                    endif
-                    wflag = flag1(my_idx)*niter_cost(ilevel)
-                    if (wflag > 2147483647) then
-                       write(*,*) ' wrong type for flag1 --> change to integer kind=8: ',wflag
-                       stop
-                    endif
-                    flag1(my_idx)=flag1(my_idx)*niter_cost(ilevel)
-                    ! Time-based blend
-                    if(time_balance_alpha > 0d0 .and. nstep_coarse > 0) then
-                       flag1(my_idx)=nint(dble(flag1(my_idx)) * blend_factor(ilevel))
-                    end if
-                    npart_sub_t(isub)=npart_sub_t(isub)+flag1(my_idx)
-                    hilbert_key(my_idx)=order_max(ncell_loc)
+                 my_idx=my_base+ncell_loc
+                 isub=(dom(ncell_loc)-1)/ncpu+1
+                 ncell_sub_t(isub)=ncell_sub_t(isub)+1
+                 if(memory_balance) then
+                    flag1(my_idx)=mem_weight_grid
+                 else
+                    flag1(my_idx)=8*10 ! Original magic number
+                 endif
+                 if(pic)then
+                    flag1(my_idx)=flag1(my_idx)+numbp(ind_grid(i))
+                 endif
+                 if(allocated(sink_per_grid))then
+                    flag1(my_idx)=flag1(my_idx)+sink_per_grid(ind_grid(i))*mem_weight_sink
+                 endif
+                 wflag = flag1(my_idx)*niter_cost(ilevel)
+                 if (wflag > 2147483647) then
+                    write(*,*) ' wrong type for flag1 --> change to integer kind=8: ',wflag
+                    stop
+                 endif
+                 flag1(my_idx)=flag1(my_idx)*niter_cost(ilevel)
+                 ! Time-based blend (hilbert path only; gated by do_time_blend)
+                 if(do_time_blend) then
+                    flag1(my_idx)=nint(dble(flag1(my_idx)) * blend_factor(ilevel))
                  end if
-              end do
+                 npart_sub_t(isub)=npart_sub_t(isub)+flag1(my_idx)
+                 hilbert_key(my_idx)=order_max(ncell_loc)
+              end if
            end do
-           ! End loop over cells
         end do
-        !$OMP END DO
-        ! End loop over grids
+        ! End loop over cells
      end do
-     ! End loop over cpus
+     !$OMP END DO
+     ! End loop over grids
   end do
   ! End loop over levels
   ! Merge thread-local accumulators
@@ -719,7 +718,7 @@ subroutine cmp_new_cpu_map
   !------------------------------------------------
   ! Sort ordering key and store new index in flag2
   !------------------------------------------------
-  if (ncell>0) call quick_sort(hilbert_key(1),flag2(1),ncell)
+  if (ncell>0) call quick_sort_omp(hilbert_key(1),flag2(1),ncell)
 
   !-----------------------------
   ! Balance cost across cpus
@@ -864,7 +863,7 @@ subroutine cmp_new_cpu_map
      ncache=active(ilevel)%ngrid
      ! Loop over grids by vector sweeps (OMP parallelized)
      !$OMP PARALLEL DO DEFAULT(SHARED) &
-     !$OMP PRIVATE(igrid,ngrid,ind_grid,ind_cell,xx,order_max,i,ind,iskip,idim,idom,xx_tmp,c_tmp) &
+     !$OMP PRIVATE(igrid,ngrid,ind_grid,ind_cell,xx,order_max,i,ind,iskip,idim,idom,xx_tmp,c_tmp,c_tmp_v) &
      !$OMP SCHEDULE(DYNAMIC,4)
      do igrid=1,ncache,nvector
         ! Gather nvector grids
@@ -901,10 +900,9 @@ subroutine cmp_new_cpu_map
                  cpu_map2(ind_cell(i)) = c_tmp(1)
               end do
            else  ! ksection
+              if(ngrid>0) call cmp_ksection_cpumap(xx,c_tmp_v,ngrid)
               do i=1,ngrid
-                 xx_tmp(1,:) = xx(i,:)
-                 call cmp_ksection_cpumap(xx_tmp,c_tmp,1)
-                 cpu_map2(ind_cell(i)) = c_tmp(1)
+                 cpu_map2(ind_cell(i)) = c_tmp_v(i)
               end do
            endif
         end do
