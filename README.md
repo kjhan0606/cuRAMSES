@@ -62,6 +62,32 @@ configuration uses the Intel `ifx` compiler with HDF5 parallel I/O and
 optional CUDA acceleration (`make HDF5=1 USE_CUDA=1`). 128-bit Morton
 keys for deep-AMR runs are enabled with `MORTON128=1`.
 
+### Bug-fix history
+
+Notable correctness fixes to the cuRAMSES contributions, kept here
+because their symptoms (silent data misrouting, restart deadlocks)
+are hard to diagnose from run logs alone.
+
+- **2026-07-22 (`5644c40`) — variable-ncpu restore: `cmp_cpumap`
+  argument shapes.** The chunked-*k*-section variable-ncpu restores in
+  [`patch/cuRamses/init_hydro.f90`](./patch/cuRamses/init_hydro.f90)
+  and [`patch/cuRamses/init_poisson.f90`](./patch/cuRamses/init_poisson.f90)
+  declared `xx_father(1:1,1:ndim)` and `c_tmp(1:1)` while `cmp_cpumap`
+  takes explicit-shape dummies `x(1:nvector,1:ndim)`, `c(1:nvector)`.
+  Under Fortran sequence association the dummy element `x(1,2)` maps to
+  element `nvector+1` of the 3-element actual, so the `'hilbert'`
+  ordering branch read garbage *y*/*z* coordinates and computed wrong
+  destination ranks — silent grid misrouting on any restart with
+  `ncpu /= ncpu_file`. The `'ksection'` branch (assumed-shape dummy)
+  and `init_amr.f90` (already `1:nvector`) were unaffected. Found while
+  root-causing a related defect in the lagRamses descendant, where the
+  same call site passed a deallocated read buffer instead of the
+  position array and hung 32-rank restarts inside `MPI_Waitall`; the
+  corrected destination logic was verified there end to end (16-rank
+  checkpoint restarted on 32 ranks, psi/hydro/poisson payloads
+  delivered with zero misroutes, mass conservation at machine
+  precision).
+
 ---
 
 ![GitHub logo dark-mode-only](./doc/img/full_project_logo_dark.svg#gh-dark-mode-only)
