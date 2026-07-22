@@ -222,8 +222,8 @@ subroutine restore_poisson_binary_varcpu
   ! Morton hash lookup
   integer(8) :: ixm, iym, izm
   type(mkey_t) :: mkey
-  real(dp) :: xg_recv(3), xx_father(1:1, 1:ndim), scale, twotol
-  integer :: c_tmp(1:1), nx_loc, nxny
+  real(dp) :: xg_recv(3), xx_father(1:nvector, 1:ndim), scale, twotol
+  integer :: c_tmp(1:nvector), nx_loc, nxny
 
   if(myid==1) write(*,*) 'Binary varcpu poisson restore (chunked ksection): ncpu_file=', ncpu_file
 
