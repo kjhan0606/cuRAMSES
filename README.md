@@ -68,6 +68,21 @@ Notable correctness fixes to the cuRAMSES contributions, kept here
 because their symptoms (silent data misrouting, restart deadlocks)
 are hard to diagnose from run logs alone.
 
+- **2026-07-29 (`5f8d0a9`) — HDF5 particle restart free-slot
+  initialisation.** The HDF5 reader restored active particles
+  contiguously into `levelp(1:npart)` but left
+  `levelp(npart+1:npartmax)` uninitialised. The next HDF5 checkpoint
+  scanned the complete array for positive levels and could mistake
+  dirty free slots for particles. The resulting pack-buffer overrun
+  corrupted the heap and commonly appeared as a later segmentation
+  fault during deallocation. The reader now clears every free slot.
+  The writer also verifies that the active-slot count equals `npart`
+  before packing. Production HDF5+FFTW tests completed same-rank
+  4-to-4 and variable-rank 4-to-2 restart-and-rewrite sequences. Both
+  retained 32768 particles. Particle identities, masses, and positions
+  were identical, while velocities and gravity agreed within a
+  relative tolerance of `1e-11`.
+
 - **2026-07-22 (`5644c40`) — variable-ncpu restore: `cmp_cpumap`
   argument shapes.** The chunked-*k*-section variable-ncpu restores in
   [`patch/cuRamses/init_hydro.f90`](./patch/cuRamses/init_hydro.f90)
