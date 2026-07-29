@@ -68,6 +68,21 @@ Notable correctness fixes to the cuRAMSES contributions, kept here
 because their symptoms (silent data misrouting, restart deadlocks)
 are hard to diagnose from run logs alone.
 
+- **2026-07-30 — leaf-aware work load balancing.** Work mode now uses
+  the actual particle occupancy of each AMR leaf instead of charging a
+  grid's complete particle list to every child. When SIDM is enabled,
+  the cost also includes the number of particle pairs sampled by the
+  primitive SIDM scatterer; DMO and other runs pay no SIDM proxy cost.
+  Sparse rank-by-level wall times update an exponentially smoothed mesh
+  and rank correction, while automatic remapping is rate-limited and
+  requires its predicted savings to repay the measured remap cost.
+  Memory mode remains independent of subcycling, timing, and SIDM work.
+  Hilbert, bisection, and k-section all use the same leaf-cost function.
+  Verified with a clean serial `make USE_FFTW=1` build and unit tests
+  for leaf occupancy, memory/work costs, SIDM gating, and remap
+  economics. (The legacy Makefile lacks complete Fortran module
+  dependencies, so a clean parallel `make -j` is not supported.)
+
 - **2026-07-29 (`5f8d0a9`) — HDF5 particle restart free-slot
   initialisation.** The HDF5 reader restored active particles
   contiguously into `levelp(1:npart)` but left
