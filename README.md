@@ -68,6 +68,30 @@ Notable correctness fixes to the cuRAMSES contributions, kept here
 because their symptoms (silent data misrouting, restart deadlocks)
 are hard to diagnose from run logs alone.
 
+- **2026-08-02 — Grid-load-balanced variable-ncpu AMR restart.** Binary
+  and HDF5 restarts that changed `ncpu` could fail with `ERROR: out of
+  free grids`: the rebuilt decomposition divided Hilbert key space
+  uniformly without considering the actual, clustered grid load. A
+  same-ncpu restart was unaffected because it read the already balanced
+  `bound_key` values from the checkpoint. The binary reader now builds
+  cumulative-load-balanced Hilbert or *k*-section boundaries after reading
+  grid positions. The streaming HDF5 reader makes one `xg`-only pre-pass
+  and uses the same cumulative-load Hilbert boundary calculation; HDF5
+  variable-ncpu or cross-ordering restarts into *k*-section now stop
+  explicitly instead of using a tree tied to the old decomposition. These
+  changes correspond to lagRamses commits `2b62526` (binary) and `cd3d64b`
+  (HDF5). In lagRamses validation, a 16-rank checkpoint containing
+  2,409,681 grids split across 8, 32, and 64 domains with imbalances
+  1.000003, 1.000020, and 1.000073, respectively, with at most five grids
+  difference. `econs`, `epot`, `ekin`, and `eint` were identical to all
+  printed digits at 16, 8, 32, and 64 ranks, while `mcons` remained about
+  `1.8e-16`. At production scale, a 367,389,712-grid checkpoint (100.7M
+  grids at level 10, 122.5M at level 11, and 125.0M at level 12) restarted
+  on 32 ranks with 11,471,339--11,490,524 grids per domain, imbalance
+  1.000836, and no errors. On the same job and nodes, the unmodified binary
+  failed under identical conditions after a receiving rank exceeded 13.8M
+  grids.
+
 - **2026-07-30 — leaf-aware work load balancing.** Work mode now uses
   the actual particle occupancy of each AMR leaf instead of charging a
   grid's complete particle list to every child. When SIDM is enabled,
