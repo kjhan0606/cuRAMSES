@@ -376,11 +376,6 @@ subroutine multigrid_fine(ilevel,icount)
                  oneoverdx2_mg, dble(twondim), dx2_norm_mg, &
                  gpu_norm2, 1)
             i_res_norm2 = gpu_norm2
-#ifndef WITHOUTMPI
-            call MPI_ALLREDUCE(i_res_norm2,i_res_norm2_tot,1, &
-                    & MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-            i_res_norm2=i_res_norm2_tot
-#endif
          else
             call cuda_mg_residual_c(int(active(ilevel)%ngrid,c_int), &
                  int(ngridmax,c_int), int(ncoarse,c_int), &
@@ -394,10 +389,22 @@ subroutine multigrid_fine(ilevel,icount)
 #ifdef HYDRO_CUDA
       end if
 #endif
-      call make_virtual_fine_dp(f(1,1),ilevel) ! communicate residual
+      ! Keep the device-computed norm when GPU RI leaves host f(:,1) stale.
+      ! The host residual is needed only by the CPU path and non-RI fallback.
+#ifdef HYDRO_CUDA
+      if((.not. use_mg_gpu) .or. (.not. use_ri_gpu)) then
+#endif
+         call make_virtual_fine_dp(f(1,1),ilevel) ! communicate residual
+#ifdef HYDRO_CUDA
+      end if
+#endif
       ! Compute norm AFTER communication (SRC-compatible ordering)
       if(iter==1) then
+#ifdef HYDRO_CUDA
+         if(.not. use_mg_gpu) call cmp_residual_norm2_fine(ilevel, i_res_norm2)
+#else
          call cmp_residual_norm2_fine(ilevel, i_res_norm2)
+#endif
 #ifndef WITHOUTMPI
          call MPI_ALLREDUCE(i_res_norm2,i_res_norm2_tot,1, &
                  & MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
@@ -503,9 +510,16 @@ subroutine multigrid_fine(ilevel,icount)
 #ifdef HYDRO_CUDA
       end if
 #endif
-      call make_virtual_fine_dp(f(1,1),ilevel) ! communicate residual
-      ! Compute norm AFTER communication (SRC-compatible ordering)
-      call cmp_residual_norm2_fine(ilevel, res_norm2)
+      ! Preserve the GPU residual norm instead of recomputing from stale host f(:,1).
+#ifdef HYDRO_CUDA
+      if(.not. use_mg_gpu) then
+#endif
+         call make_virtual_fine_dp(f(1,1),ilevel) ! communicate residual
+         ! Compute norm AFTER communication (SRC-compatible ordering)
+         call cmp_residual_norm2_fine(ilevel, res_norm2)
+#ifdef HYDRO_CUDA
+      end if
+#endif
 #ifndef WITHOUTMPI
       call MPI_ALLREDUCE(res_norm2,res_norm2_tot,1, &
               & MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)

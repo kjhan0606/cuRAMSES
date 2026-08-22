@@ -68,6 +68,23 @@ Notable correctness fixes to the cuRAMSES contributions, kept here
 because their symptoms (silent data misrouting, restart deadlocks)
 are hard to diagnose from run logs alone.
 
+- **2026-08-22 — CUDA multigrid residual convergence.** With GPU
+  restriction/interpolation enabled, the CUDA kernels computed valid
+  initial and post-smoothing residual norms, but the Fortran driver then
+  overwrote both values by recomputing them from stale host-side
+  `f(:,1)`. This made the reported relative error remain exactly one,
+  forcing every solve to its iteration limit and potentially triggering a
+  strict-solver abort. The device solution arithmetic itself was not
+  overwritten. The driver now preserves the GPU norms, limits the host
+  residual exchange to the CPU and non-GPU-RI fallback paths, limits host
+  norm recomputation to the CPU path, and applies one common MPI reduction
+  per norm. In a small
+  two-rank CUDA/nDGP smoke run of the lagRamses descendant, the original
+  path stalled at `Error=1.000` and aborted; after this correction its GPU
+  MG error decreased through approximately `8.40e-2`, `6.15e-3`,
+  `4.53e-4`, and `3.35e-5`, and both CPU and GPU variants completed. This
+  confirms the convergence fix, not full CPU/GPU numerical parity.
+
 - **2026-08-02 — Grid-load-balanced variable-ncpu AMR restart.** Binary
   and HDF5 restarts that changed `ncpu` could fail with `ERROR: out of
   free grids`: the rebuilt decomposition divided Hilbert key space
